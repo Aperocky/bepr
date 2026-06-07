@@ -29,6 +29,7 @@ use tokio_tungstenite::{
 
 pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
+pub const DEFAULT_BIND: &str = "127.0.0.1:25223";
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 
@@ -341,7 +342,7 @@ impl ServerConfig {
         }
 
         Ok(Self {
-            bind: bind.unwrap_or_else(|| "127.0.0.1:8080".to_string()),
+            bind: bind.unwrap_or_else(|| DEFAULT_BIND.to_string()),
             key_dir: key_dir.ok_or("config missing key_dir")?,
         })
     }
@@ -494,7 +495,7 @@ mod tests {
     fn server_config_parse_defaults_bind() {
         let config = ServerConfig::parse("key_dir = /etc/bepr/keys").unwrap();
 
-        assert_eq!(config.bind, "127.0.0.1:8080");
+        assert_eq!(config.bind, DEFAULT_BIND);
         assert_eq!(config.key_dir, "/etc/bepr/keys");
     }
 

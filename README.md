@@ -48,7 +48,7 @@ Create the server config on the server machine:
 
 ```txt
 # /etc/bepr/server.conf
-bind = 0.0.0.0:8080
+bind = 0.0.0.0:25223
 key_dir = /etc/bepr/keys
 ```
 
@@ -57,7 +57,7 @@ client ID as the public key filename on the server:
 
 ```txt
 # /etc/bepr/client.conf
-server = ws://server.example:8080/bepr/laptop
+server = ws://server.example:25223/bepr/laptop
 private_key_path = /home/alice/.ssh/id_ed25519
 shell = /bin/sh
 ```
