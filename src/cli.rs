@@ -23,16 +23,16 @@ pub async fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: bepr server [--config server.conf]\n       bepr client [--config client.conf]\n       bepr connect <client_id>\n       bepr list\n       bepr keygen".to_string()
+    "usage: bepr server [--config server.conf]\n       bepr client [--config client.conf]\n       bepr connect [--socket path] <client_id>\n       bepr list [--socket path]\n       bepr keygen".to_string()
 }
 
 async fn connect(args: Vec<String>) -> Result<(), String> {
-    let client_id = parse_connect_args(args)?;
-    let mut stream = UnixStream::connect(DEFAULT_OPERATOR_SOCKET)
+    let args = parse_connect_args(args)?;
+    let mut stream = UnixStream::connect(&args.socket)
         .await
         .map_err(|err| err.to_string())?;
     stream
-        .write_all(format!("CONNECT {client_id}\n").as_bytes())
+        .write_all(format!("CONNECT {}\n", args.client_id).as_bytes())
         .await
         .map_err(|err| err.to_string())?;
 
@@ -72,8 +72,8 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
 }
 
 async fn list(args: Vec<String>) -> Result<(), String> {
-    parse_list_args(args)?;
-    let mut stream = UnixStream::connect(DEFAULT_OPERATOR_SOCKET)
+    let args = parse_list_args(args)?;
+    let mut stream = UnixStream::connect(&args.socket)
         .await
         .map_err(|err| err.to_string())?;
     stream
@@ -99,17 +99,40 @@ async fn list(args: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_connect_args(args: Vec<String>) -> Result<String, String> {
+#[derive(Debug, PartialEq, Eq)]
+struct ConnectArgs {
+    client_id: String,
+    socket: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ListArgs {
+    socket: String,
+}
+
+fn parse_connect_args(args: Vec<String>) -> Result<ConnectArgs, String> {
     match args.as_slice() {
-        [client_id] => Ok(client_id.clone()),
-        _ => Err("usage: bepr connect <client_id>".to_string()),
+        [client_id] => Ok(ConnectArgs {
+            client_id: client_id.clone(),
+            socket: DEFAULT_OPERATOR_SOCKET.to_string(),
+        }),
+        [flag, socket, client_id] if flag == "--socket" => Ok(ConnectArgs {
+            client_id: client_id.clone(),
+            socket: socket.clone(),
+        }),
+        _ => Err("usage: bepr connect [--socket path] <client_id>".to_string()),
     }
 }
 
-fn parse_list_args(args: Vec<String>) -> Result<(), String> {
+fn parse_list_args(args: Vec<String>) -> Result<ListArgs, String> {
     match args.as_slice() {
-        [] => Ok(()),
-        _ => Err("usage: bepr list".to_string()),
+        [] => Ok(ListArgs {
+            socket: DEFAULT_OPERATOR_SOCKET.to_string(),
+        }),
+        [flag, socket] if flag == "--socket" => Ok(ListArgs {
+            socket: socket.clone(),
+        }),
+        _ => Err("usage: bepr list [--socket path]".to_string()),
     }
 }
 
@@ -142,7 +165,26 @@ mod tests {
     fn parse_connect_args_accepts_client_id() {
         assert_eq!(
             parse_connect_args(vec!["laptop".to_string()]).unwrap(),
-            "laptop"
+            ConnectArgs {
+                client_id: "laptop".to_string(),
+                socket: DEFAULT_OPERATOR_SOCKET.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_connect_args_accepts_socket_flag() {
+        assert_eq!(
+            parse_connect_args(vec![
+                "--socket".to_string(),
+                "/tmp/bepr-remote.sock".to_string(),
+                "laptop".to_string(),
+            ])
+            .unwrap(),
+            ConnectArgs {
+                client_id: "laptop".to_string(),
+                socket: "/tmp/bepr-remote.sock".to_string(),
+            }
         );
     }
 
@@ -158,7 +200,26 @@ mod tests {
 
     #[test]
     fn parse_list_args_accepts_no_args() {
-        assert!(parse_list_args(Vec::new()).is_ok());
+        assert_eq!(
+            parse_list_args(Vec::new()).unwrap(),
+            ListArgs {
+                socket: DEFAULT_OPERATOR_SOCKET.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_list_args_accepts_socket_flag() {
+        assert_eq!(
+            parse_list_args(vec![
+                "--socket".to_string(),
+                "/tmp/bepr-remote.sock".to_string(),
+            ])
+            .unwrap(),
+            ListArgs {
+                socket: "/tmp/bepr-remote.sock".to_string(),
+            }
+        );
     }
 
     #[test]

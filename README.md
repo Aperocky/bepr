@@ -3,10 +3,12 @@
 A tiny authenticated client/server reverse shell over outbound WebSocket
 connections.
 
-One package, one binary, two separate configuration for server/client. 
+One package, one binary: server mode, client mode, and operator commands.
 
 At setup, you must have access to both host (server + client), but after that,
 you should only need access to the client.
+
+![bepr connection model](assets/bepr-flow.svg)
 
 This is intentionally basic:
 
@@ -19,12 +21,6 @@ This is intentionally basic:
 - one shell/operator attachment per client at a time
 
 This allow the binary size to be under 1MB, and runs on similar memory footprint.
-
-## Build
-
-```sh
-cargo build --release
-```
 
 ## Usage
 
@@ -61,7 +57,7 @@ client ID as the public key filename on the server:
 
 ```txt
 # /etc/bepr/client.conf
-server = ws://server.example:8080/agent/laptop
+server = ws://server.example:8080/bepr/laptop
 private_key_path = /home/alice/.ssh/id_ed25519
 shell = /bin/sh
 ```
@@ -96,6 +92,23 @@ bepr connect laptop
 Once attached, the `bepr connect` terminal stdin/stdout is piped to the selected
 client shell. Multiple clients may be connected to the server at the same time,
 but a single client can only have one operator attached at a time.
+
+To operate from another machine, forward the server's local operator socket with
+SSH:
+
+```sh
+ssh -N -L /tmp/bepr-remote.sock:/tmp/bepr.sock user@server.example
+```
+
+Then point operator commands at the forwarded local socket:
+
+```sh
+bepr list --socket /tmp/bepr-remote.sock
+bepr connect --socket /tmp/bepr-remote.sock laptop
+```
+
+This keeps bepr's control socket local to the server. SSH handles remote access
+and authentication.
 
 Config overrides are available for manual testing:
 

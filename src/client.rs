@@ -336,14 +336,14 @@ mod tests {
     fn client_config_parse_reads_required_fields_and_shell() {
         let config = ClientConfig::parse(
             "
-            server = ws://127.0.0.1:8080/agent/default
+            server = ws://127.0.0.1:8080/bepr/default
             private_key_path = /home/me/.ssh/id_ed25519
             shell = /bin/sh
             ",
         )
         .unwrap();
 
-        assert_eq!(config.server, "ws://127.0.0.1:8080/agent/default");
+        assert_eq!(config.server, "ws://127.0.0.1:8080/bepr/default");
         assert_eq!(
             config.private_key,
             PrivateKeyConfig::Path("/home/me/.ssh/id_ed25519".to_string())
@@ -355,7 +355,7 @@ mod tests {
     fn client_config_parse_defaults_shell() {
         let config = ClientConfig::parse(
             "
-            server = ws://127.0.0.1:8080/agent/default
+            server = ws://127.0.0.1:8080/bepr/default
             private_key_path = /home/me/.ssh/id_ed25519
             ",
         )
@@ -368,7 +368,7 @@ mod tests {
     fn client_config_parse_rejects_unknown_key() {
         assert!(ClientConfig::parse(
             "
-            server = ws://127.0.0.1:8080/agent/default
+            server = ws://127.0.0.1:8080/bepr/default
             private_key_path = /home/me/.ssh/id_ed25519
             typo = nope
             ",
@@ -379,12 +379,12 @@ mod tests {
     #[test]
     fn client_config_from_args_accepts_positional_hex_key() {
         let config = ClientConfig::from_args(vec![
-            "ws://127.0.0.1:8080/agent/default".to_string(),
+            "ws://127.0.0.1:8080/bepr/default".to_string(),
             "00".repeat(32),
         ])
         .unwrap();
 
-        assert_eq!(config.server, "ws://127.0.0.1:8080/agent/default");
+        assert_eq!(config.server, "ws://127.0.0.1:8080/bepr/default");
         assert_eq!(config.private_key, PrivateKeyConfig::Hex("00".repeat(32)));
         assert_eq!(config.shell, "/bin/sh");
     }

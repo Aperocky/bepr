@@ -38,7 +38,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
     let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
-    eprintln!("listening on ws://{}/agent/<client_id>", config.bind);
+    eprintln!("listening on ws://{}/bepr/<client_id>", config.bind);
     eprintln!("operator socket {}", DEFAULT_OPERATOR_SOCKET);
 
     loop {
@@ -74,7 +74,7 @@ async fn handle_agent(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut client_id = None;
     let ws = accept_hdr_async(stream, |req: &Request, resp: Response| {
-        let Some(id) = req.uri().path().strip_prefix("/agent/") else {
+        let Some(id) = req.uri().path().strip_prefix("/bepr/") else {
             return Err(error_response(StatusCode::NOT_FOUND, "unknown endpoint"));
         };
         if !keys.contains_key(id) {

@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="760" viewBox="0 0 1500 760" role="img" aria-labelledby="title desc">
+  <title id="title">bepr connection flow</title>
+  <desc id="desc">bepr server runs on the server host. The operator connects locally to the server socket. The client host opens an outbound WebSocket to the server and exposes a shell stream after key authentication.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#243447"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#15803d"/>
+    </marker>
+    <marker id="arrow-green-start" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M 8 0 L 0 4 L 8 8 z" fill="#15803d"/>
+    </marker>
+    <style>
+      text {
+        font-family: Helvetica, Arial, sans-serif;
+        fill: #1f2933;
+      }
+      .title {
+        font-size: 34px;
+        font-weight: 700;
+      }
+      .subtitle {
+        font-size: 17px;
+        fill: #52606d;
+      }
+      .host-title {
+        font-size: 24px;
+        font-weight: 700;
+      }
+      .section {
+        font-size: 18px;
+        font-weight: 700;
+      }
+      .body {
+        font-size: 15px;
+        fill: #3e4c59;
+      }
+      .code {
+        font-family: Menlo, Consolas, monospace;
+        font-size: 14px;
+        fill: #1f2933;
+      }
+      .tiny {
+        font-size: 13px;
+        fill: #52606d;
+      }
+      .server-host {
+        fill: #eef6ff;
+        stroke: #2563eb;
+        stroke-width: 2;
+      }
+      .operator-host {
+        fill: #fff7ed;
+        stroke: #ea580c;
+        stroke-width: 2;
+      }
+      .client-host {
+        fill: #ecfdf3;
+        stroke: #16a34a;
+        stroke-width: 2;
+      }
+      .internet {
+        fill: #f8fafc;
+        stroke: #94a3b8;
+        stroke-width: 2;
+        stroke-dasharray: 10 8;
+      }
+      .card {
+        fill: #ffffff;
+        stroke: #9aa5b1;
+        stroke-width: 1.5;
+      }
+      .server-card {
+        fill: #dbeafe;
+        stroke: #2563eb;
+      }
+      .operator-card {
+        fill: #ffedd5;
+        stroke: #ea580c;
+      }
+      .client-card {
+        fill: #dcfce7;
+        stroke: #16a34a;
+      }
+      .shell-card {
+        fill: #f0fdf4;
+        stroke: #65a30d;
+      }
+      .note {
+        fill: #ffffff;
+        stroke: #cbd5e1;
+        stroke-width: 1.2;
+      }
+      .arrow {
+        fill: none;
+        stroke: #243447;
+        stroke-width: 3;
+        marker-end: url(#arrow);
+      }
+      .blue-arrow {
+        fill: none;
+        stroke: #1d4ed8;
+        stroke-width: 3;
+        marker-end: url(#arrow-blue);
+      }
+      .green-arrow {
+        fill: none;
+        stroke: #15803d;
+        stroke-width: 3;
+        marker-end: url(#arrow-green);
+      }
+      .green-bidir {
+        fill: none;
+        stroke: #15803d;
+        stroke-width: 3;
+        marker-start: url(#arrow-green-start);
+        marker-end: url(#arrow-green);
+      }
+      .dash {
+        stroke-dasharray: 9 7;
+      }
+    </style>
+  </defs>
+
+  <rect width="1500" height="760" fill="#f7f7f7"/>
+
+  <text class="title" x="750" y="55" text-anchor="middle">bepr connection model</text>
+  <text class="subtitle" x="750" y="84" text-anchor="middle">one bepr binary: server mode, client mode, and operator commands</text>
+  <text class="subtitle" x="750" y="108" text-anchor="middle">client dials out; operator attaches through the server-side control socket</text>
+
+  <rect class="operator-host" x="50" y="210" width="315" height="250" rx="12"/>
+  <text class="host-title" x="208" y="250" text-anchor="middle">operator host</text>
+  <text class="tiny" x="208" y="274" text-anchor="middle">optional</text>
+  <rect class="card operator-card" x="85" y="292" width="245" height="78" rx="8"/>
+  <text class="section" x="208" y="322" text-anchor="middle">operator command</text>
+  <text class="code" x="208" y="348" text-anchor="middle">bepr connect --socket</text>
+  <rect class="note" x="85" y="386" width="245" height="52" rx="8"/>
+  <text class="section" x="208" y="407" text-anchor="middle">SSH socket forward</text>
+  <text class="code" x="208" y="428" text-anchor="middle">remote.sock -> /tmp/bepr.sock</text>
+
+  <rect class="server-host" x="430" y="130" width="430" height="515" rx="12"/>
+  <text class="host-title" x="645" y="172" text-anchor="middle">server host</text>
+
+  <rect class="card" x="475" y="184" width="340" height="46" rx="8"/>
+  <text class="body" x="645" y="204" text-anchor="middle">public key copied to server</text>
+  <text class="code" x="645" y="222" text-anchor="middle">/etc/bepr/keys/laptop.pub</text>
+
+  <rect class="client-host" x="1040" y="130" width="410" height="515" rx="12"/>
+  <text class="host-title" x="1245" y="172" text-anchor="middle">client host</text>
+
+  <rect class="internet" x="885" y="210" width="130" height="350" rx="12"/>
+  <text class="section" x="950" y="245" text-anchor="middle">internet</text>
+  <text class="body" x="950" y="270" text-anchor="middle">outbound</text>
+  <text class="body" x="950" y="293" text-anchor="middle">only</text>
+
+  <rect class="card server-card" x="475" y="255" width="340" height="112" rx="8"/>
+  <text class="section" x="645" y="288" text-anchor="middle">bepr server</text>
+  <text class="code" x="645" y="316" text-anchor="middle">/etc/bepr/server.conf</text>
+  <text class="body" x="645" y="340" text-anchor="middle">routes clients and operators</text>
+
+  <rect class="card" x="475" y="420" width="340" height="86" rx="8"/>
+  <text class="section" x="645" y="452" text-anchor="middle">local control socket</text>
+  <text class="code" x="645" y="480" text-anchor="middle">/tmp/bepr.sock</text>
+
+  <rect class="card operator-card" x="475" y="552" width="340" height="68" rx="8"/>
+  <text class="section" x="645" y="578" text-anchor="middle">local operator command</text>
+  <text class="code" x="645" y="602" text-anchor="middle">bepr connect laptop</text>
+
+  <rect class="card client-card" x="1085" y="220" width="320" height="120" rx="8"/>
+  <text class="section" x="1245" y="255" text-anchor="middle">bepr client</text>
+  <text class="code" x="1245" y="285" text-anchor="middle">/etc/bepr/client.conf</text>
+  <text class="code" x="1245" y="311" text-anchor="middle">ws://server:8080/bepr/laptop</text>
+
+  <rect class="card shell-card" x="1085" y="425" width="320" height="120" rx="8"/>
+  <text class="section" x="1245" y="460" text-anchor="middle">client shell</text>
+  <text class="code" x="1245" y="490" text-anchor="middle">/bin/sh</text>
+  <text class="body" x="1245" y="516" text-anchor="middle">stdin/stdout/stderr are piped</text>
+
+  <rect class="card" x="1085" y="565" width="320" height="54" rx="8"/>
+  <text class="body" x="1245" y="588" text-anchor="middle">private key stays on client</text>
+  <text class="code" x="1245" y="610" text-anchor="middle">~/.ssh/id_ed25519</text>
+
+  <path class="arrow dash" d="M 645 230 L 645 255"/>
+  <text class="tiny" x="666" y="249">authorizes client ID</text>
+
+  <path class="blue-arrow" d="M 1085 280 C 1020 280, 1000 335, 950 335 C 900 335, 870 302, 815 302"/>
+  <rect class="note" x="820" y="350" width="260" height="72" rx="8"/>
+  <text class="section" x="950" y="376" text-anchor="middle">1. outbound WebSocket</text>
+  <text class="tiny" x="950" y="399" text-anchor="middle">client signs server challenge</text>
+
+  <path class="arrow" d="M 645 552 L 645 506"/>
+  <path class="arrow" d="M 645 420 L 645 367"/>
+
+  <path class="arrow dash" d="M 330 412 C 395 412, 420 463, 475 463"/>
+
+  <path class="green-bidir" d="M 815 485 C 930 620, 1025 620, 1085 485"/>
+  <rect class="note" x="810" y="592" width="290" height="72" rx="8"/>
+  <text class="section" x="955" y="618" text-anchor="middle">3. raw bidirectional stream</text>
+  <text class="tiny" x="955" y="641" text-anchor="middle">operator terminal &lt;-&gt; client shell</text>
+
+  <path class="arrow dash" d="M 1245 565 L 1245 545"/>
+  <text class="tiny" x="1282" y="558">client signs with private key</text>
+</svg>
