@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fs, net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    env,
+    fs,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use base64ct::{Base64, Encoding};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -6,7 +14,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UnixListener, UnixStream},
-    sync::{mpsc, Mutex},
+    sync::{mpsc, oneshot, Mutex},
+    time::interval,
 };
 use tokio_tungstenite::{
     accept_hdr_async,
@@ -20,6 +29,8 @@ use tokio_tungstenite::{
 
 pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
+const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
+const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 
 type PublicKeys = Arc<HashMap<String, VerifyingKey>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -55,9 +66,10 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             }
             accepted = ops.accept() => {
                 let (stream, _) = accepted.map_err(|err| err.to_string())?;
+                let keys = keys.clone();
                 let sessions = sessions.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_operator(stream, sessions).await {
+                    if let Err(err) = handle_operator(stream, keys, sessions).await {
                         eprintln!("operator: {err}");
                     }
                 });
@@ -95,6 +107,10 @@ async fn handle_agent(
 
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (to_client_tx, mut to_client_rx) = mpsc::channel::<Vec<u8>>(32);
+    let last_pong = Arc::new(Mutex::new(Instant::now()));
+    let heartbeat_interval = heartbeat_interval();
+    let heartbeat_timeout = heartbeat_timeout();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     {
         let mut sessions = sessions.lock().await;
@@ -111,29 +127,68 @@ async fn handle_agent(
     }
 
     let client_for_writer = client_id.clone();
+    let last_pong_for_writer = last_pong.clone();
     let write_task = tokio::spawn(async move {
-        while let Some(bytes) = to_client_rx.recv().await {
-            ws_tx.send(Message::Binary(bytes)).await?;
+        let mut shutdown_tx = Some(shutdown_tx);
+        let mut heartbeat = interval(heartbeat_interval);
+        loop {
+            tokio::select! {
+                Some(bytes) = to_client_rx.recv() => {
+                    ws_tx.send(Message::Binary(bytes)).await?;
+                }
+                _ = heartbeat.tick() => {
+                    if last_pong_for_writer.lock().await.elapsed() > heartbeat_timeout {
+                        ws_tx.send(Message::Close(None)).await?;
+                        if let Some(tx) = shutdown_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        break;
+                    }
+                    ws_tx.send(Message::Ping(Vec::new())).await?;
+                }
+                else => break,
+            }
         }
         Ok::<_, tokio_tungstenite::tungstenite::Error>(())
     });
 
-    while let Some(msg) = ws_rx.next().await {
-        let bytes = match msg? {
-            Message::Binary(bytes) => bytes,
-            Message::Text(text) => text.into_bytes(),
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let operator = {
-            sessions
-                .lock()
-                .await
-                .get(&client_id)
-                .and_then(|session| session.to_operator.clone())
-        };
-        if let Some(operator) = operator {
-            let _ = operator.send(bytes).await;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => {
+                break;
+            }
+            msg = ws_rx.next() => {
+                let Some(msg) = msg else {
+                    break;
+                };
+                let msg = match msg {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        eprintln!("{addr}: {err}");
+                        break;
+                    }
+                };
+                let bytes = match msg {
+                    Message::Binary(bytes) => bytes,
+                    Message::Text(text) => text.into_bytes(),
+                    Message::Pong(_) => {
+                        *last_pong.lock().await = Instant::now();
+                        continue;
+                    }
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let operator = {
+                    sessions
+                        .lock()
+                        .await
+                        .get(&client_id)
+                        .and_then(|session| session.to_operator.clone())
+                };
+                if let Some(operator) = operator {
+                    let _ = operator.send(bytes).await;
+                }
+            }
         }
     }
 
@@ -145,11 +200,12 @@ async fn handle_agent(
 
 async fn handle_operator(
     mut stream: UnixStream,
+    keys: PublicKeys,
     sessions: Sessions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let command = read_line(&mut stream).await?;
     if command == "LIST" {
-        return list_sessions(stream, sessions).await;
+        return list_sessions(stream, keys, sessions).await;
     }
     let Some(client_id) = command.strip_prefix("CONNECT ") else {
         stream.write_all(b"ERR unknown command\n").await?;
@@ -202,16 +258,17 @@ async fn handle_operator(
 
 async fn list_sessions(
     mut stream: UnixStream,
+    keys: PublicKeys,
     sessions: Sessions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lines = Vec::new();
     {
         let sessions = sessions.lock().await;
-        for (client_id, session) in sessions.iter() {
-            let state = if session.to_operator.is_some() {
-                "attached"
+        for client_id in keys.keys() {
+            let state = if sessions.contains_key(client_id) {
+                "connected"
             } else {
-                "idle"
+                "disconnected"
             };
             lines.push(format!("{client_id}\t{state}\n"));
         }
@@ -223,6 +280,21 @@ async fn list_sessions(
     }
     stream.flush().await?;
     Ok(())
+}
+
+fn heartbeat_interval() -> Duration {
+    Duration::from_millis(env_u64("BEPR_HEARTBEAT_INTERVAL_MS", HEARTBEAT_INTERVAL_MS))
+}
+
+fn heartbeat_timeout() -> Duration {
+    Duration::from_millis(env_u64("BEPR_HEARTBEAT_TIMEOUT_MS", HEARTBEAT_TIMEOUT_MS))
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }
 
 #[derive(Debug, PartialEq, Eq)]

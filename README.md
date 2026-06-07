@@ -77,7 +77,7 @@ Run the client:
 bepr client
 ```
 
-From the server machine, list connected clients:
+From the server machine, list registered clients and their state:
 
 ```sh
 bepr list

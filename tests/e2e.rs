@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::mpsc,
+    sync::{Mutex as StdMutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +13,7 @@ const OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 
 #[test]
 fn authenticated_client_pipes_shell_output_to_server() {
+    let _test_guard = test_lock().lock().unwrap();
     build_bin();
     let _socket_guard = TestSocketGuard::new();
 
@@ -63,7 +65,7 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let mut list = ChildGuard::new(list);
     let list_stdout = read_lines(list.child.stdout.take().unwrap());
     let _list_stderr = read_lines(list.child.stderr.take().unwrap());
-    assert_line_contains(&list_stdout, "default\tidle", Duration::from_secs(5));
+    assert_line_contains(&list_stdout, "default\tconnected", Duration::from_secs(5));
     list.kill();
 
     let connect = Command::new(&bepr_bin)
@@ -96,12 +98,121 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let _ = fs::remove_dir_all(key_dir);
 }
 
+#[test]
+fn client_disconnect_clears_session_and_allows_reconnect() {
+    let _test_guard = test_lock().lock().unwrap();
+    build_bin();
+    let _socket_guard = TestSocketGuard::new();
+
+    let port = free_port();
+    let private_key_path = temp_file("bepr-heartbeat-id-ed25519");
+    generate_ed25519_key(&private_key_path);
+    let public_key_path = PathBuf::from(format!("{}.pub", private_key_path.display()));
+    let key_dir = temp_dir("bepr-heartbeat-keys");
+    fs::create_dir(&key_dir).expect("create key dir");
+    fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
+    let server_config_path = write_server_config(port, &key_dir);
+    let client_config_path = write_client_config(port, &private_key_path);
+    let bepr_bin = bin_path("bepr");
+
+    let server = Command::new(&bepr_bin)
+        .arg("server")
+        .arg("--config")
+        .arg(&server_config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr server");
+    let mut server = ChildGuard::new(server);
+
+    let server_stderr = read_lines(server.child.stderr.take().unwrap());
+    wait_for_tcp(port);
+
+    let client = Command::new(&bepr_bin)
+        .arg("client")
+        .arg("--config")
+        .arg(&client_config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr client");
+    let mut client = ChildGuard::new(client);
+
+    let _client_stderr = read_lines(client.child.stderr.take().unwrap());
+    assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(5));
+
+    let list = Command::new(&bepr_bin)
+        .arg("list")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr list");
+    let mut list = ChildGuard::new(list);
+    let list_stdout = read_lines(list.child.stdout.take().unwrap());
+    let _list_stderr = read_lines(list.child.stderr.take().unwrap());
+    assert_line_contains(&list_stdout, "default\tconnected", Duration::from_secs(5));
+    list.kill();
+
+    client.kill();
+    assert_line_contains(&server_stderr, "disconnected default", Duration::from_secs(5));
+
+    let list = Command::new(&bepr_bin)
+        .arg("list")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr list after disconnect");
+    let mut list = ChildGuard::new(list);
+    let list_stdout = read_lines(list.child.stdout.take().unwrap());
+    let _list_stderr = read_lines(list.child.stderr.take().unwrap());
+    assert_line_contains(&list_stdout, "default\tdisconnected", Duration::from_secs(5));
+    list.kill();
+
+    let client = Command::new(&bepr_bin)
+        .arg("client")
+        .arg("--config")
+        .arg(&client_config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("restart bepr client");
+    let mut client = ChildGuard::new(client);
+    let _client_stderr = read_lines(client.child.stderr.take().unwrap());
+    assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(10));
+
+    let list = Command::new(&bepr_bin)
+        .arg("list")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr list after reconnect");
+    let mut list = ChildGuard::new(list);
+    let list_stdout = read_lines(list.child.stdout.take().unwrap());
+    let _list_stderr = read_lines(list.child.stderr.take().unwrap());
+    assert_line_contains(&list_stdout, "default\tconnected", Duration::from_secs(10));
+    list.kill();
+
+    client.kill();
+    server.kill();
+    let _ = fs::remove_file(server_config_path);
+    let _ = fs::remove_file(client_config_path);
+    let _ = fs::remove_file(private_key_path);
+    let _ = fs::remove_file(public_key_path);
+    let _ = fs::remove_dir_all(key_dir);
+}
+
 fn build_bin() {
-    let status = Command::new("cargo")
-        .args(["build", "-p", "bepr"])
-        .status()
-        .expect("run cargo build");
-    assert!(status.success(), "cargo build failed");
+    static BUILD: OnceLock<()> = OnceLock::new();
+    BUILD.get_or_init(|| {
+        let status = Command::new("cargo")
+            .args(["build", "-p", "bepr"])
+            .status()
+            .expect("run cargo build");
+        assert!(status.success(), "cargo build failed");
+    });
 }
 
 fn bin_path(name: &str) -> PathBuf {
@@ -208,6 +319,11 @@ fn assert_line_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Dura
         }
     }
     panic!("did not see {needle:?}; saw {seen:?}");
+}
+
+fn test_lock() -> &'static StdMutex<()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
 }
 
 struct ChildGuard {
