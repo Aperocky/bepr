@@ -18,8 +18,8 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
+pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
-const DEFAULT_OPERATOR_SOCKET: &str = "/run/bepr/operator.sock";
 
 type PublicKeys = Arc<HashMap<String, VerifyingKey>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -35,11 +35,11 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     let keys = Arc::new(config.load_public_keys().map_err(|err| err.to_string())?);
     let sessions = Sessions::default();
     let tcp = TcpListener::bind(&config.bind).await.map_err(|err| err.to_string())?;
-    prepare_operator_socket(&config.operator_socket).map_err(|err| err.to_string())?;
-    let ops = UnixListener::bind(&config.operator_socket).map_err(|err| err.to_string())?;
+    prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
+    let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
     eprintln!("listening on ws://{}/agent/<client_id>", config.bind);
-    eprintln!("operator socket {}", config.operator_socket);
+    eprintln!("operator socket {}", DEFAULT_OPERATOR_SOCKET);
 
     loop {
         tokio::select! {
@@ -147,7 +147,15 @@ async fn handle_operator(
     mut stream: UnixStream,
     sessions: Sessions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client_id = read_line(&mut stream).await?;
+    let command = read_line(&mut stream).await?;
+    if command == "LIST" {
+        return list_sessions(stream, sessions).await;
+    }
+    let Some(client_id) = command.strip_prefix("CONNECT ") else {
+        stream.write_all(b"ERR unknown command\n").await?;
+        return Ok(());
+    };
+    let client_id = client_id.to_string();
     let (to_client, mut to_operator_rx) = {
         let mut sessions = sessions.lock().await;
         let Some(session) = sessions.get_mut(&client_id) else {
@@ -192,11 +200,35 @@ async fn handle_operator(
     Ok(())
 }
 
+async fn list_sessions(
+    mut stream: UnixStream,
+    sessions: Sessions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lines = Vec::new();
+    {
+        let sessions = sessions.lock().await;
+        for (client_id, session) in sessions.iter() {
+            let state = if session.to_operator.is_some() {
+                "attached"
+            } else {
+                "idle"
+            };
+            lines.push(format!("{client_id}\t{state}\n"));
+        }
+    }
+    lines.sort();
+    stream.write_all(b"OK\n").await?;
+    for line in lines {
+        stream.write_all(line.as_bytes()).await?;
+    }
+    stream.flush().await?;
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ServerConfig {
     pub bind: String,
     pub key_dir: String,
-    pub operator_socket: String,
 }
 
 impl ServerConfig {
@@ -215,7 +247,6 @@ impl ServerConfig {
     fn parse(input: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bind = None;
         let mut key_dir = None;
-        let mut operator_socket = None;
 
         for (idx, line) in input.lines().enumerate() {
             let line = line.trim();
@@ -233,7 +264,6 @@ impl ServerConfig {
             match key {
                 "bind" => bind = Some(value.to_string()),
                 "key_dir" => key_dir = Some(value.to_string()),
-                "operator_socket" => operator_socket = Some(value.to_string()),
                 _ => return Err(format!("config:{} unknown key {key}", idx + 1).into()),
             }
         }
@@ -241,7 +271,6 @@ impl ServerConfig {
         Ok(Self {
             bind: bind.unwrap_or_else(|| "127.0.0.1:8080".to_string()),
             key_dir: key_dir.ok_or("config missing key_dir")?,
-            operator_socket: operator_socket.unwrap_or_else(|| DEFAULT_OPERATOR_SOCKET.to_string()),
         })
     }
 
@@ -376,19 +405,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn server_config_parse_reads_operator_socket() {
+    fn server_config_parse_reads_bind_and_key_dir() {
         let config = ServerConfig::parse(
             "
             bind = 0.0.0.0:8080
             key_dir = /etc/bepr/keys
-            operator_socket = /tmp/bepr.sock
             ",
         )
         .unwrap();
 
         assert_eq!(config.bind, "0.0.0.0:8080");
         assert_eq!(config.key_dir, "/etc/bepr/keys");
-        assert_eq!(config.operator_socket, "/tmp/bepr.sock");
     }
 
     #[test]

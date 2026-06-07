@@ -33,11 +33,12 @@ Recommended installed paths:
 /etc/bepr/server.conf
 /etc/bepr/keys/default.pub
 /etc/bepr/keys/laptop.pub
-/run/bepr/operator.sock
+/tmp/bepr.sock
 ```
 
-`bepr client` reads `/etc/bepr/client.conf` by default. `bepr server` and
-`bepr connect` read `/etc/bepr/server.conf` by default.
+`bepr client` reads `/etc/bepr/client.conf` by default. `bepr server` reads
+`/etc/bepr/server.conf` by default. `bepr connect` and `bepr list` use
+`/tmp/bepr.sock`.
 
 ## Manual key setup
 
@@ -57,7 +58,6 @@ for example as `/etc/bepr/keys/default.pub`.
 ```txt
 bind = 0.0.0.0:8080
 key_dir = /etc/bepr/keys
-operator_socket = /run/bepr/operator.sock
 ```
 
 Every `*.pub` file in `key_dir` is an allowed client. The client ID is the file
@@ -99,13 +99,59 @@ Operator attach on the server machine:
 bepr connect default
 ```
 
+List connected clients from the server machine:
+
+```sh
+bepr list
+```
+
 Overrides:
 
 ```sh
 bepr server --config ./server.conf
 bepr client --config ./client.conf
-bepr connect default --config ./server.conf
 ```
 
 Once attached, the `bepr connect` terminal stdin/stdout is piped to the selected
 client shell.
+
+## Operator IPC
+
+The server listens on `/tmp/bepr.sock`, a local Unix socket. Operator commands
+are one line of UTF-8 text terminated by `\n`.
+
+List clients:
+
+```txt
+LIST\n
+```
+
+Response:
+
+```txt
+OK\n
+<client_id>\t<idle|attached>\n
+...
+```
+
+Attach to a client:
+
+```txt
+CONNECT <client_id>\n
+```
+
+Response:
+
+```txt
+OK\n
+```
+
+After `OK\n`, the connection switches to raw byte pipe mode. Bytes from the
+operator socket go to the client shell stdin, and bytes from the client shell
+stdout/stderr come back on the same socket.
+
+Errors are one line:
+
+```txt
+ERR <message>\n
+```

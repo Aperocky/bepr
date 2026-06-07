@@ -8,9 +8,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+const OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
+
 #[test]
 fn authenticated_client_pipes_shell_output_to_server() {
     build_bin();
+    let _socket_guard = TestSocketGuard::new();
 
     let port = free_port();
     let private_key_path = temp_file("bepr-integ-id-ed25519");
@@ -19,8 +22,7 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let key_dir = temp_dir("bepr-integ-keys");
     fs::create_dir(&key_dir).expect("create key dir");
     fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
-    let operator_socket = temp_socket("bepr-integ-operator");
-    let server_config_path = write_server_config(port, &key_dir, &operator_socket);
+    let server_config_path = write_server_config(port, &key_dir);
     let client_config_path = write_client_config(port, &private_key_path);
     let bepr_bin = bin_path("bepr");
 
@@ -52,11 +54,21 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let _client_stderr = read_lines(client.child.stderr.take().unwrap());
     assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(5));
 
+    let list = Command::new(&bepr_bin)
+        .arg("list")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr list");
+    let mut list = ChildGuard::new(list);
+    let list_stdout = read_lines(list.child.stdout.take().unwrap());
+    let _list_stderr = read_lines(list.child.stderr.take().unwrap());
+    assert_line_contains(&list_stdout, "default\tidle", Duration::from_secs(5));
+    list.kill();
+
     let connect = Command::new(&bepr_bin)
         .arg("connect")
         .arg("default")
-        .arg("--config")
-        .arg(&server_config_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -81,7 +93,6 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let _ = fs::remove_file(client_config_path);
     let _ = fs::remove_file(private_key_path);
     let _ = fs::remove_file(public_key_path);
-    let _ = fs::remove_file(operator_socket);
     let _ = fs::remove_dir_all(key_dir);
 }
 
@@ -131,15 +142,11 @@ fn generate_ed25519_key(path: &PathBuf) {
     assert!(status.success(), "ssh-keygen failed");
 }
 
-fn write_server_config(port: u16, key_dir: &PathBuf, operator_socket: &PathBuf) -> PathBuf {
+fn write_server_config(port: u16, key_dir: &PathBuf) -> PathBuf {
     let path = temp_file("bepr-integ-server-conf");
     fs::write(
         &path,
-        format!(
-            "bind = 127.0.0.1:{port}\nkey_dir = {}\noperator_socket = {}\n",
-            key_dir.display(),
-            operator_socket.display()
-        ),
+        format!("bind = 127.0.0.1:{port}\nkey_dir = {}\n", key_dir.display()),
     )
     .expect("write server config");
     path
@@ -172,14 +179,6 @@ fn temp_dir(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
-}
-
-fn temp_socket(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("{name}-{}-{nanos}.sock", std::process::id()))
 }
 
 fn read_lines<R: std::io::Read + Send + 'static>(reader: R) -> mpsc::Receiver<String> {
@@ -229,5 +228,20 @@ impl ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+struct TestSocketGuard;
+
+impl TestSocketGuard {
+    fn new() -> Self {
+        let _ = fs::remove_file(OPERATOR_SOCKET);
+        Self
+    }
+}
+
+impl Drop for TestSocketGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(OPERATOR_SOCKET);
     }
 }
