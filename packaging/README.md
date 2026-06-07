@@ -10,6 +10,7 @@ The packages install:
 /etc/bepr/keys/
 /etc/bepr/client.conf.example
 /etc/bepr/server.conf.example
+/var/log/bepr/
 ```
 
 The deb wrapper installs `bepr.service` under `/lib/systemd/system/`. The rpm
@@ -89,6 +90,13 @@ Edit the copied config before enabling the service.
 If `/etc/bepr/server.conf` exists, `bepr.service` runs `bepr server`. If
 `/etc/bepr/client.conf` exists, it runs `bepr client`. If both exist or neither
 exists, the service exits with an error.
+
+Service logs are written by mode:
+
+```txt
+/var/log/bepr/server.log
+/var/log/bepr/client.log
+```
 
 On macOS, use launchd after creating exactly one active config:
 

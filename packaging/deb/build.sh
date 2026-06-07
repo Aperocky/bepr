@@ -18,6 +18,7 @@ mkdir -p \
     "$WORK/DEBIAN" \
     "$WORK/usr/bin" \
     "$WORK/etc/bepr/keys" \
+    "$WORK/var/log/bepr" \
     "$WORK/lib/systemd/system" \
     "$OUT"
 

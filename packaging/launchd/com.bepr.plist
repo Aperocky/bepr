@@ -12,13 +12,14 @@
         <string>-eu</string>
         <string>-c</string>
         <string>
+mkdir -p /var/log/bepr
 if [ -f /etc/bepr/server.conf ] &amp;&amp; [ -f /etc/bepr/client.conf ]; then
     echo "both /etc/bepr/server.conf and /etc/bepr/client.conf exist; keep exactly one" &gt;&amp;2
     exit 1
 elif [ -f /etc/bepr/server.conf ]; then
-    exec /usr/local/bin/bepr server
+    exec /usr/local/bin/bepr server &gt;&gt;/var/log/bepr/server.log 2&gt;&amp;1
 elif [ -f /etc/bepr/client.conf ]; then
-    exec /usr/local/bin/bepr client
+    exec /usr/local/bin/bepr client &gt;&gt;/var/log/bepr/client.log 2&gt;&amp;1
 else
     echo "missing /etc/bepr/server.conf or /etc/bepr/client.conf" &gt;&amp;2
     exit 1
@@ -32,10 +33,7 @@ fi
     <key>KeepAlive</key>
     <true/>
 
-    <key>StandardOutPath</key>
-    <string>/var/log/bepr.log</string>
-
     <key>StandardErrorPath</key>
-    <string>/var/log/bepr.err</string>
+    <string>/var/log/bepr/service.err</string>
 </dict>
 </plist>

@@ -1,5 +1,8 @@
 # Changelog
 
+### v0.1.4
+- ⚙️  Write packaged service logs to `/var/log/bepr/server.log` and `/var/log/bepr/client.log`
+
 ### v0.1.3
 - ✨ Add local `$ ` prompt for interactive `bepr connect`
 - ⚙️  Change the default server bind port to `25223`

@@ -21,6 +21,7 @@ rm -rf "$WORK"
 mkdir -p \
     "$WORK/usr/local/bin" \
     "$WORK/etc/bepr/keys" \
+    "$WORK/var/log/bepr" \
     "$WORK/Library/LaunchDaemons" \
     "$OUT"
 

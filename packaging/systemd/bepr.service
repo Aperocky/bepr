@@ -5,14 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+LogsDirectory=bepr
 ExecStart=/bin/sh -eu -c '\
     if [ -f /etc/bepr/server.conf ] && [ -f /etc/bepr/client.conf ]; then \
         echo "both /etc/bepr/server.conf and /etc/bepr/client.conf exist; keep exactly one" >&2; \
         exit 1; \
     elif [ -f /etc/bepr/server.conf ]; then \
-        exec /usr/bin/bepr server; \
+        exec /usr/bin/bepr server >>/var/log/bepr/server.log 2>&1; \
     elif [ -f /etc/bepr/client.conf ]; then \
-        exec /usr/bin/bepr client; \
+        exec /usr/bin/bepr client >>/var/log/bepr/client.log 2>&1; \
     else \
         echo "missing /etc/bepr/server.conf or /etc/bepr/client.conf" >&2; \
         exit 1; \

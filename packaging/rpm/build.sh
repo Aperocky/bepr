@@ -17,6 +17,7 @@ rm -rf "$WORK"
 mkdir -p \
     "$WORK/usr/bin" \
     "$WORK/etc/bepr/keys" \
+    "$WORK/var/log/bepr" \
     "$WORK/usr/lib/systemd/system" \
     "$OUT"
 
@@ -49,6 +50,7 @@ fi
 /usr/bin/bepr
 %dir /etc/bepr
 %dir /etc/bepr/keys
+%dir /var/log/bepr
 %config(noreplace) /etc/bepr/server.conf.example
 %config(noreplace) /etc/bepr/client.conf.example
 /usr/lib/systemd/system/bepr.service

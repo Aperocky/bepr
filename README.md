@@ -158,6 +158,13 @@ sudo launchctl kickstart -k system/com.bepr
 
 For client mode, create `/etc/bepr/client.conf` instead.
 
+Service logs are written by mode:
+
+```txt
+/var/log/bepr/server.log
+/var/log/bepr/client.log
+```
+
 ## Packaging
 
 Packaging files live under `packaging/`.
@@ -182,6 +189,7 @@ The packages install:
 /etc/bepr/server.conf.example
 /etc/bepr/client.conf.example
 /etc/bepr/keys/
+/var/log/bepr/
 /lib/systemd/system/bepr.service      # deb
 /usr/lib/systemd/system/bepr.service  # rpm
 /Library/LaunchDaemons/com.bepr.plist # macOS pkg
