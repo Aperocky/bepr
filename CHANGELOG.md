@@ -1,5 +1,9 @@
 # Changelog
 
+### v0.2.0
+- ✨ Spawn client shells inside a PTY with `pty-process`
+- 🐛 Remove the fake local `bepr connect` prompt
+
 ### v0.1.4
 - 🐛 Make `exit` in the remote shell close `bepr connect`
 - 🐛 Move the interactive `bepr connect` input prompt to stderr and reduce prompt/output interleaving

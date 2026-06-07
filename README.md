@@ -14,7 +14,6 @@ This is intentionally basic:
 
 - no enrollment
 - no discovery
-- no PTY
 - no persistence
 - no per-connection multiplexing
 - multiple clients can be connected at once
@@ -90,7 +89,8 @@ bepr connect laptop
 ```
 
 Once attached, the `bepr connect` terminal stdin/stdout is piped to the selected
-client shell. Multiple clients may be connected to the server at the same time,
+client shell. Client shells run inside a PTY, while the server remains a raw
+byte router. Multiple clients may be connected to the server at the same time,
 but a single client can only have one operator attached at a time.
 
 To operate from another machine, forward the server's local operator socket with

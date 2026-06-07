@@ -5,8 +5,6 @@ use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::Command,
-    sync::mpsc,
     time::sleep,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -42,46 +40,13 @@ async fn run_once(
     ws.send(Message::Binary(key.sign(&challenge).to_bytes().to_vec()))
         .await?;
 
-    let mut child = Command::new(shell)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    let mut child_stdin = child.stdin.take().ok_or("missing child stdin")?;
-    let mut child_stdout = child.stdout.take().ok_or("missing child stdout")?;
-    let mut child_stderr = child.stderr.take().ok_or("missing child stderr")?;
+    let (pty, pts) = pty_process::open()?;
+    let mut child = pty_process::Command::new(shell)
+        .env("TERM", "xterm")
+        .spawn(pts)?;
+    let (mut pty_read, mut pty_write) = pty.into_split();
     let (mut ws_tx, mut ws_rx) = ws.split();
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(32);
-
-    let stdout_tx = out_tx.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = [0_u8; 8192];
-        loop {
-            let n = child_stdout.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            if stdout_tx.send(buf[..n].to_vec()).await.is_err() {
-                break;
-            }
-        }
-        Ok::<_, std::io::Error>(())
-    });
-
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = [0_u8; 8192];
-        loop {
-            let n = child_stderr.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            if out_tx.send(buf[..n].to_vec()).await.is_err() {
-                break;
-            }
-        }
-        Ok::<_, std::io::Error>(())
-    });
+    let mut buf = [0_u8; 8192];
 
     loop {
         tokio::select! {
@@ -90,16 +55,20 @@ async fn run_once(
                 ws_tx.send(Message::Close(None)).await?;
                 break;
             }
-            Some(bytes) = out_rx.recv() => {
-                ws_tx.send(Message::Binary(bytes)).await?;
+            read = pty_read.read(&mut buf) => {
+                let n = read?;
+                if n == 0 {
+                    break;
+                }
+                ws_tx.send(Message::Binary(buf[..n].to_vec())).await?;
             }
             msg = ws_rx.next() => {
                 let Some(msg) = msg else {
                     break;
                 };
                 match msg? {
-                    Message::Binary(bytes) => child_stdin.write_all(&bytes).await?,
-                    Message::Text(text) => child_stdin.write_all(text.as_bytes()).await?,
+                    Message::Binary(bytes) => pty_write.write_all(&bytes).await?,
+                    Message::Text(text) => pty_write.write_all(text.as_bytes()).await?,
                     Message::Close(_) => break,
                     _ => {}
                 }
@@ -108,8 +77,6 @@ async fn run_once(
     }
 
     let _ = child.kill().await;
-    stdout_task.abort();
-    stderr_task.abort();
     Ok(())
 }
 

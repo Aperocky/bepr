@@ -1,9 +1,8 @@
-use std::{env, io::IsTerminal, time::Duration};
+use std::env;
 
 use tokio::{
-    io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
+    io::{self, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
-    time::sleep,
 };
 
 use crate::{
@@ -43,37 +42,18 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
     }
 
     let (mut reader, mut writer) = stream.into_split();
-    let stdin_is_terminal = std::io::stdin().is_terminal();
     let mut stdout = io::stdout();
 
     let to_daemon = tokio::spawn(async move {
-        if stdin_is_terminal {
-            let mut stdin = io::BufReader::new(io::stdin());
-            let mut stderr = io::stderr();
-            let mut line = Vec::new();
-            loop {
-                stderr.write_all(b"> ").await?;
-                stderr.flush().await?;
-                line.clear();
-                let n = stdin.read_until(b'\n', &mut line).await?;
-                if n == 0 {
-                    break;
-                }
-                writer.write_all(&line).await?;
-                writer.flush().await?;
-                sleep(Duration::from_millis(100)).await;
+        let mut stdin = io::stdin();
+        let mut buf = [0_u8; 8192];
+        loop {
+            let n = stdin.read(&mut buf).await?;
+            if n == 0 {
+                break;
             }
-        } else {
-            let mut stdin = io::stdin();
-            let mut buf = [0_u8; 8192];
-            loop {
-                let n = stdin.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                writer.write_all(&buf[..n]).await?;
-                writer.flush().await?;
-            }
+            writer.write_all(&buf[..n]).await?;
+            writer.flush().await?;
         }
         Ok::<_, std::io::Error>(())
     });

@@ -78,7 +78,7 @@ fn authenticated_client_pipes_shell_output_to_server() {
         .expect("spawn bepr connect");
     let mut connect = ChildGuard::new(connect);
     let connect_stdout = read_lines(connect.child.stdout.take().unwrap());
-    let connect_stderr = read_lines(connect.child.stderr.take().unwrap());
+    let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
 
     writeln!(
         connect.child.stdin.as_mut().expect("connect stdin"),
@@ -87,8 +87,6 @@ fn authenticated_client_pipes_shell_output_to_server() {
     .expect("write command to connect stdin");
 
     assert_line_contains(&connect_stdout, "bepr-integ-ok", Duration::from_secs(5));
-    assert_no_line_contains(&connect_stdout, "> ", Duration::from_millis(250));
-    assert_no_line_contains(&connect_stderr, "> ", Duration::from_millis(250));
 
     writeln!(connect.child.stdin.as_mut().expect("connect stdin"), "exit")
         .expect("write exit to connect stdin");
@@ -211,13 +209,13 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
 }
 
 #[test]
-fn terminal_connect_shows_input_prompt_and_exits() {
+fn terminal_connect_pipes_tty_input_and_exits() {
     let _test_guard = test_lock().lock().unwrap_or_else(|err| err.into_inner());
     build_bin();
     let _socket_guard = TestSocketGuard::new();
 
     if !has_script_command() {
-        eprintln!("skipping terminal prompt test: script command not found");
+        eprintln!("skipping terminal input test: script command not found");
         return;
     }
 
@@ -264,7 +262,6 @@ fn terminal_connect_shows_input_prompt_and_exits() {
     let connect_stdout = read_chunks(connect.child.stdout.take().unwrap());
     let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
 
-    assert_chunk_contains(&connect_stdout, "> ", Duration::from_secs(5));
     writeln!(
         connect.child.stdin.as_mut().expect("connect stdin"),
         "printf 'bepr-tty-ok\\n'"
@@ -475,21 +472,6 @@ fn assert_chunk_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Dur
         }
     }
     panic!("did not see {needle:?}; saw {seen:?}");
-}
-
-fn assert_no_line_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    let mut seen = Vec::new();
-    while Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(line) if line.contains(needle) => {
-                panic!("saw unexpected {needle:?} in {line:?}; saw {seen:?}");
-            }
-            Ok(line) => seen.push(line),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
 }
 
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) {
