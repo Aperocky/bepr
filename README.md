@@ -3,11 +3,10 @@
 A tiny authenticated client/server reverse shell over outbound WebSocket
 connections.
 
-The client opens an outbound WebSocket to the server. The server already knows
-the client public key. On connect, the server sends a random challenge and
-accepts the connection only if the client signs that challenge with the matching
-Ed25519 private key. After that, an operator on the server can attach a terminal
-and both sides pipe raw bytes.
+One package, one binary, two separate configuration for server/client. 
+
+At setup, you must have access to both host (server + client), but after that,
+you should only need access to the client.
 
 This is intentionally basic:
 
@@ -18,6 +17,8 @@ This is intentionally basic:
 - no per-connection multiplexing
 - multiple clients can be connected at once
 - one shell/operator attachment per client at a time
+
+This allow the binary size to be under 1MB, and runs on similar memory footprint.
 
 ## Build
 
@@ -147,6 +148,9 @@ For client mode, create `/etc/bepr/client.conf` instead.
 ## Packaging
 
 Packaging files live under `packaging/`.
+
+GitHub Actions builds native Linux packages for x86_64 and arm64, plus a macOS
+pkg, from `.github/workflows/package.yml`.
 
 Build packages from an existing release binary:
 

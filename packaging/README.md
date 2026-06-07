@@ -36,6 +36,15 @@ packaging/deb/build.sh
 
 The package is written to `target/package/`.
 
+For cross-built deb packages, point the wrapper at the target binary and set the
+Debian architecture:
+
+```sh
+BEPR_BIN=target/x86_64-unknown-linux-gnu/release/bepr \
+BEPR_DEB_ARCH=amd64 \
+packaging/deb/build.sh
+```
+
 ## Build an rpm
 
 ```sh

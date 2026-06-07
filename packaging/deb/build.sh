@@ -2,9 +2,9 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-BIN="$ROOT/target/release/bepr"
+BIN="${BEPR_BIN:-$ROOT/target/release/bepr}"
 VERSION="$(awk -F\" '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
-ARCH="$(dpkg --print-architecture)"
+ARCH="${BEPR_DEB_ARCH:-$(dpkg --print-architecture)}"
 OUT="$ROOT/target/package"
 WORK="$ROOT/target/package/debroot"
 
