@@ -1,0 +1,8 @@
+[workspace]
+members = ["crates/bepr-client", "crates/bepr-server", "bepr-integ"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
