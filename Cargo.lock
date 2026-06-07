@@ -9,23 +9,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bepr-client"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "ed25519-dalek",
- "futures-util",
- "getrandom",
- "tokio",
- "tokio-tungstenite",
-]
-
-[[package]]
-name = "bepr-integ"
-version = "0.1.0"
-
-[[package]]
-name = "bepr-server"
+name = "bepr"
 version = "0.1.0"
 dependencies = [
  "base64ct",

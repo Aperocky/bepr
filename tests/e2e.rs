@@ -10,62 +10,84 @@ use std::{
 
 #[test]
 fn authenticated_client_pipes_shell_output_to_server() {
-    build_bins();
+    build_bin();
 
     let port = free_port();
     let private_key_path = temp_file("bepr-integ-id-ed25519");
     generate_ed25519_key(&private_key_path);
     let public_key_path = PathBuf::from(format!("{}.pub", private_key_path.display()));
-    let server_config_path = write_server_config(port, &public_key_path);
+    let key_dir = temp_dir("bepr-integ-keys");
+    fs::create_dir(&key_dir).expect("create key dir");
+    fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
+    let operator_socket = temp_socket("bepr-integ-operator");
+    let server_config_path = write_server_config(port, &key_dir, &operator_socket);
     let client_config_path = write_client_config(port, &private_key_path);
-    let server_bin = bin_path("bepr-server");
-    let client_bin = bin_path("bepr-client");
+    let bepr_bin = bin_path("bepr");
 
-    let server = Command::new(server_bin)
+    let server = Command::new(&bepr_bin)
+        .arg("server")
         .arg("--config")
         .arg(&server_config_path)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn bepr-server");
+        .expect("spawn bepr server");
     let mut server = ChildGuard::new(server);
 
-    let _server_stderr = read_lines(server.child.stderr.take().unwrap());
+    let server_stderr = read_lines(server.child.stderr.take().unwrap());
     wait_for_tcp(port);
 
-    let client = Command::new(client_bin)
+    let client = Command::new(&bepr_bin)
+        .arg("client")
         .arg("--config")
         .arg(&client_config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn bepr-client");
+        .expect("spawn bepr client");
     let mut client = ChildGuard::new(client);
 
     let _client_stderr = read_lines(client.child.stderr.take().unwrap());
-    let server_stdout = read_lines(server.child.stdout.take().unwrap());
+    assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(5));
+
+    let connect = Command::new(&bepr_bin)
+        .arg("connect")
+        .arg("default")
+        .arg("--config")
+        .arg(&server_config_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr connect");
+    let mut connect = ChildGuard::new(connect);
+    let connect_stdout = read_lines(connect.child.stdout.take().unwrap());
+    let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
 
     writeln!(
-        server.child.stdin.as_mut().expect("server stdin"),
+        connect.child.stdin.as_mut().expect("connect stdin"),
         "printf 'bepr-integ-ok\\n'"
     )
-    .expect("write command to server stdin");
+    .expect("write command to connect stdin");
 
-    assert_line_contains(&server_stdout, "bepr-integ-ok", Duration::from_secs(5));
+    assert_line_contains(&connect_stdout, "bepr-integ-ok", Duration::from_secs(5));
 
+    connect.kill();
     client.kill();
     server.kill();
     let _ = fs::remove_file(server_config_path);
     let _ = fs::remove_file(client_config_path);
     let _ = fs::remove_file(private_key_path);
     let _ = fs::remove_file(public_key_path);
+    let _ = fs::remove_file(operator_socket);
+    let _ = fs::remove_dir_all(key_dir);
 }
 
-fn build_bins() {
+fn build_bin() {
     let status = Command::new("cargo")
-        .args(["build", "-p", "bepr-server", "-p", "bepr-client"])
+        .args(["build", "-p", "bepr"])
         .status()
         .expect("run cargo build");
     assert!(status.success(), "cargo build failed");
@@ -109,13 +131,14 @@ fn generate_ed25519_key(path: &PathBuf) {
     assert!(status.success(), "ssh-keygen failed");
 }
 
-fn write_server_config(port: u16, public_key_path: &PathBuf) -> PathBuf {
+fn write_server_config(port: u16, key_dir: &PathBuf, operator_socket: &PathBuf) -> PathBuf {
     let path = temp_file("bepr-integ-server-conf");
     fs::write(
         &path,
         format!(
-            "bind = 127.0.0.1:{port}\nclient = default, {}\n",
-            public_key_path.display()
+            "bind = 127.0.0.1:{port}\nkey_dir = {}\noperator_socket = {}\n",
+            key_dir.display(),
+            operator_socket.display()
         ),
     )
     .expect("write server config");
@@ -141,6 +164,22 @@ fn temp_file(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("{name}-{}-{nanos}.txt", std::process::id()))
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+}
+
+fn temp_socket(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{name}-{}-{nanos}.sock", std::process::id()))
 }
 
 fn read_lines<R: std::io::Read + Send + 'static>(reader: R) -> mpsc::Receiver<String> {

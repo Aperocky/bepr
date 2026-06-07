@@ -1,8 +1,13 @@
-[workspace]
-members = ["crates/bepr-client", "crates/bepr-server", "bepr-integ"]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "bepr"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
-version = "0.1.0"
+
+[dependencies]
+base64ct = { version = "1", default-features = false, features = ["alloc"] }
+ed25519-dalek = "2"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = { version = "0.2", default-features = false }
+tokio = { version = "1", default-features = false, features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }

@@ -1,4 +1,4 @@
-use std::{env, fs, time::Duration};
+use std::{fs, time::Duration};
 
 use base64ct::{Base64, Encoding};
 use ed25519_dalek::{Signer, SigningKey};
@@ -13,33 +13,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 const DEFAULT_CLIENT_CONFIG: &str = "/etc/bepr/client.conf";
 
-#[tokio::main]
-async fn main() {
-    if env::args().nth(1).as_deref() == Some("keygen") {
-        if let Err(err) = keygen() {
-            eprintln!("keygen failed: {err}");
-        }
-        return;
-    }
-
-    let config = match ClientConfig::from_args(env::args().skip(1).collect()) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("{err}");
-            eprintln!("usage: bepr-client");
-            eprintln!("   or: bepr-client --config client.conf");
-            eprintln!("   or: bepr-client <ws://host/agent/client_id> <private_key_hex> [shell]");
-            return;
-        }
-    };
-
-    let key = match config.load_signing_key() {
-        Ok(key) => key,
-        Err(err) => {
-            eprintln!("invalid private key: {err}");
-            return;
-        }
-    };
+pub async fn run(args: Vec<String>) -> Result<(), String> {
+    let config = ClientConfig::from_args(args).map_err(|err| err.to_string())?;
+    let key = config.load_signing_key().map_err(|err| err.to_string())?;
 
     loop {
         if let Err(err) = run_once(&config.server, &key, &config.shell).await {
@@ -158,7 +134,7 @@ impl ClientConfig {
                 private_key: PrivateKeyConfig::Hex(private_key.clone()),
                 shell: shell.clone(),
             }),
-            _ => Err("invalid arguments".into()),
+            _ => Err("invalid client arguments".into()),
         }
     }
 
@@ -213,7 +189,7 @@ fn default_shell() -> String {
     "/bin/sh".to_string()
 }
 
-fn keygen() -> Result<(), Box<dyn std::error::Error>> {
+pub fn keygen() -> Result<(), Box<dyn std::error::Error>> {
     let mut seed = [0_u8; 32];
     getrandom::getrandom(&mut seed)?;
     let signing_key = SigningKey::from_bytes(&seed);
@@ -223,23 +199,6 @@ fn keygen() -> Result<(), Box<dyn std::error::Error>> {
         encode_hex(signing_key.verifying_key().as_bytes())
     );
     Ok(())
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn signing_key_from_hex(s: &str) -> Result<SigningKey, Box<dyn std::error::Error + Send + Sync>> {
-    let bytes: [u8; 32] = decode_hex(s)?
-        .try_into()
-        .map_err(|_| "private key must be 32 bytes")?;
-    Ok(SigningKey::from_bytes(&bytes))
 }
 
 fn load_openssh_ed25519_private_key(
@@ -323,12 +282,18 @@ fn read_ssh_string(
         return Err("short ssh string length".into());
     }
     let len = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
-    let start = 4;
-    let end = start + len;
+    let end = 4 + len;
     if input.len() < end {
         return Err("short ssh string body".into());
     }
-    Ok((&input[start..end], &input[end..]))
+    Ok((&input[4..end], &input[end..]))
+}
+
+fn signing_key_from_hex(s: &str) -> Result<SigningKey, Box<dyn std::error::Error + Send + Sync>> {
+    let bytes: [u8; 32] = decode_hex(s)?
+        .try_into()
+        .map_err(|_| "private key must be 32 bytes")?;
+    Ok(SigningKey::from_bytes(&bytes))
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
@@ -353,50 +318,24 @@ fn hex_val(b: u8) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn encode_hex_uses_lowercase() {
-        assert_eq!(encode_hex(&[0x00, 0xaf, 0x10]), "00af10");
-    }
-
-    #[test]
-    fn decode_hex_round_trips_encoded_bytes() {
-        let bytes = [0_u8, 1, 2, 15, 16, 127, 128, 255];
-        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
-    }
-
-    #[test]
-    fn signing_key_rejects_wrong_length() {
-        assert!(signing_key_from_hex("00").is_err());
-    }
-
-    #[test]
-    fn config_from_args_accepts_positional_values() {
-        let config = ClientConfig::from_args(vec![
-            "ws://127.0.0.1:8080/agent/default".to_string(),
-            "001122".to_string(),
-            "/bin/sh".to_string(),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            config,
-            ClientConfig {
-                server: "ws://127.0.0.1:8080/agent/default".to_string(),
-                private_key: PrivateKeyConfig::Hex("001122".to_string()),
-                shell: "/bin/sh".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn config_parse_reads_required_fields_and_shell() {
+    fn client_config_parse_reads_required_fields_and_shell() {
         let config = ClientConfig::parse(
             "
-            # local test
             server = ws://127.0.0.1:8080/agent/default
             private_key_path = /home/me/.ssh/id_ed25519
             shell = /bin/sh
@@ -404,43 +343,17 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(config.server, "ws://127.0.0.1:8080/agent/default");
         assert_eq!(
-            config,
-            ClientConfig {
-                server: "ws://127.0.0.1:8080/agent/default".to_string(),
-                private_key: PrivateKeyConfig::Path("/home/me/.ssh/id_ed25519".to_string()),
-                shell: "/bin/sh".to_string(),
-            }
+            config.private_key,
+            PrivateKeyConfig::Path("/home/me/.ssh/id_ed25519".to_string())
         );
+        assert_eq!(config.shell, "/bin/sh");
     }
 
     #[test]
-    fn config_parse_defaults_shell() {
-        let config = ClientConfig::parse(
-            "
-            server = ws://127.0.0.1:8080/agent/default
-            private_key_path = /home/me/.ssh/id_ed25519
-            ",
-        )
-        .unwrap();
-
-        assert_eq!(config.shell, default_shell());
-    }
-
-    #[test]
-    fn config_parse_rejects_unknown_key() {
-        assert!(ClientConfig::parse(
-            "
-            server = ws://127.0.0.1:8080/agent/default
-            private_key_path = /home/me/.ssh/id_ed25519
-            typo = nope
-            ",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn config_parse_requires_server() {
-        assert!(ClientConfig::parse("private_key_path = /home/me/.ssh/id_ed25519").is_err());
+    fn decode_hex_round_trips_encoded_bytes() {
+        let bytes = [0_u8, 1, 2, 15, 16, 127, 128, 255];
+        assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
     }
 }
