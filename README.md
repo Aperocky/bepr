@@ -3,7 +3,7 @@
 A tiny authenticated client/server reverse shell over outbound WebSocket
 connections.
 
-One package, one binary: server mode, client mode, and operator commands.
+One package, one binary: server mode, client mode, and operator mode.
 
 At setup, you must have access to both host (server + client), but after that,
 you should only need access to the client.

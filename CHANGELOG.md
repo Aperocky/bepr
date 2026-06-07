@@ -2,6 +2,7 @@
 
 ### v0.2.0
 - ✨ Spawn client shells inside a PTY with `pty-process`
+- ✨ Put `bepr connect` terminal input into raw mode for PTY sessions
 - 🐛 Remove the fake local `bepr connect` prompt
 
 ### v0.1.4

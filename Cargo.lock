@@ -17,6 +17,7 @@ dependencies = [
  "futures-util",
  "getrandom",
  "pty-process",
+ "rustix",
  "tokio",
  "tokio-tungstenite",
 ]

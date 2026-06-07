@@ -1,5 +1,6 @@
-use std::env;
+use std::{env, io::IsTerminal, os::fd::AsFd};
 
+use rustix::termios::{tcgetattr, tcsetattr, OptionalActions, Termios};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -42,6 +43,7 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
     }
 
     let (mut reader, mut writer) = stream.into_split();
+    let mut raw_terminal = RawTerminal::enable_if_terminal().map_err(|err| err.to_string())?;
     let mut stdout = io::stdout();
 
     let to_daemon = tokio::spawn(async move {
@@ -67,6 +69,9 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
         stdout.write_all(&buf[..n]).await.map_err(|err| err.to_string())?;
         stdout.flush().await.map_err(|err| err.to_string())?;
     }
+    raw_terminal
+        .restore()
+        .map_err(|err| format!("restore terminal: {err}"))?;
     to_daemon.abort();
     std::process::exit(0);
 }
@@ -155,6 +160,40 @@ async fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
     String::from_utf8(bytes)
         .map(|line| line.trim().to_string())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "line is not utf-8"))
+}
+
+struct RawTerminal {
+    original: Option<Termios>,
+}
+
+impl RawTerminal {
+    fn enable_if_terminal() -> rustix::io::Result<Self> {
+        let stdin = std::io::stdin();
+        if !stdin.is_terminal() {
+            return Ok(Self { original: None });
+        }
+
+        let original = tcgetattr(stdin.as_fd())?;
+        let mut raw = original.clone();
+        raw.make_raw();
+        tcsetattr(stdin.as_fd(), OptionalActions::Now, &raw)?;
+        Ok(Self {
+            original: Some(original),
+        })
+    }
+
+    fn restore(&mut self) -> rustix::io::Result<()> {
+        if let Some(original) = self.original.take() {
+            tcsetattr(std::io::stdin().as_fd(), OptionalActions::Now, &original)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
 }
 
 #[cfg(test)]
