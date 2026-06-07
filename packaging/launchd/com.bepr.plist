@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bepr</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-eu</string>
+        <string>-c</string>
+        <string>
+if [ -f /etc/bepr/server.conf ] &amp;&amp; [ -f /etc/bepr/client.conf ]; then
+    echo "both /etc/bepr/server.conf and /etc/bepr/client.conf exist; keep exactly one" &gt;&amp;2
+    exit 1
+elif [ -f /etc/bepr/server.conf ]; then
+    exec /usr/local/bin/bepr server
+elif [ -f /etc/bepr/client.conf ]; then
+    exec /usr/local/bin/bepr client
+else
+    echo "missing /etc/bepr/server.conf or /etc/bepr/client.conf" &gt;&amp;2
+    exit 1
+fi
+        </string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/bepr.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/bepr.err</string>
+</dict>
+</plist>

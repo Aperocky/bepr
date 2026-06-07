@@ -1,0 +1,24 @@
+[Unit]
+Description=bepr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -eu -c '\
+    if [ -f /etc/bepr/server.conf ] && [ -f /etc/bepr/client.conf ]; then \
+        echo "both /etc/bepr/server.conf and /etc/bepr/client.conf exist; keep exactly one" >&2; \
+        exit 1; \
+    elif [ -f /etc/bepr/server.conf ]; then \
+        exec /usr/bin/bepr server; \
+    elif [ -f /etc/bepr/client.conf ]; then \
+        exec /usr/bin/bepr client; \
+    else \
+        echo "missing /etc/bepr/server.conf or /etc/bepr/client.conf" >&2; \
+        exit 1; \
+    fi'
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

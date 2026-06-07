@@ -23,6 +23,9 @@ This is intentionally basic:
 cargo build --release
 ```
 
+Basic systemd, launchd, deb, rpm, and macOS pkg packaging files live under
+`packaging/`.
+
 ## Install layout
 
 Recommended installed paths:
@@ -39,6 +42,46 @@ Recommended installed paths:
 `bepr client` reads `/etc/bepr/client.conf` by default. `bepr server` reads
 `/etc/bepr/server.conf` by default. `bepr connect` and `bepr list` use
 `/tmp/bepr.sock`.
+
+## macOS pkg
+
+Build a macOS package:
+
+```sh
+cargo build --release --locked
+packaging/macos/build.sh
+```
+
+Install it:
+
+```sh
+sudo installer -pkg target/package/bepr-0.1.0.pkg -target /
+```
+
+The pkg installs:
+
+```txt
+/usr/local/bin/bepr
+/etc/bepr/server.conf.example
+/etc/bepr/client.conf.example
+/etc/bepr/keys/
+/Library/LaunchDaemons/com.bepr.plist
+```
+
+The launchd service is installed but not loaded or started. Create exactly one
+active config, edit it, then load the daemon:
+
+```sh
+sudo cp /etc/bepr/server.conf.example /etc/bepr/server.conf
+sudo vi /etc/bepr/server.conf
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.bepr.plist
+sudo launchctl enable system/com.bepr
+sudo launchctl kickstart -k system/com.bepr
+```
+
+For client mode, create `/etc/bepr/client.conf` instead. If both
+`server.conf` and `client.conf` exist, launchd starts `com.bepr` and it exits
+with an error.
 
 ## Manual key setup
 
