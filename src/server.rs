@@ -419,12 +419,42 @@ mod tests {
     }
 
     #[test]
+    fn server_config_parse_defaults_bind() {
+        let config = ServerConfig::parse("key_dir = /etc/bepr/keys").unwrap();
+
+        assert_eq!(config.bind, "127.0.0.1:8080");
+        assert_eq!(config.key_dir, "/etc/bepr/keys");
+    }
+
+    #[test]
+    fn server_config_parse_requires_key_dir() {
+        assert!(ServerConfig::parse("bind = 127.0.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn server_config_parse_rejects_operator_socket_key() {
+        assert!(ServerConfig::parse(
+            "
+            bind = 127.0.0.1:8080
+            key_dir = /etc/bepr/keys
+            operator_socket = /tmp/other.sock
+            ",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn parse_public_key_reads_openssh_ed25519() {
         let key = parse_openssh_ed25519_public_key(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPPixtDFSIPO+YfoD8qk2AQFNAfh7NuizV5cdQ0ii4CI\n",
         )
         .unwrap();
         assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn parse_public_key_rejects_non_ed25519_kind() {
+        assert!(parse_openssh_ed25519_public_key("ssh-rsa AAAA").is_err());
     }
 
     #[test]

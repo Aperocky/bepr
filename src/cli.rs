@@ -133,3 +133,36 @@ async fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
         .map(|line| line.trim().to_string())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "line is not utf-8"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_connect_args_accepts_client_id() {
+        assert_eq!(
+            parse_connect_args(vec!["laptop".to_string()]).unwrap(),
+            "laptop"
+        );
+    }
+
+    #[test]
+    fn parse_connect_args_rejects_config_flag() {
+        assert!(parse_connect_args(vec![
+            "laptop".to_string(),
+            "--config".to_string(),
+            "server.conf".to_string(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn parse_list_args_accepts_no_args() {
+        assert!(parse_list_args(Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn parse_list_args_rejects_extra_args() {
+        assert!(parse_list_args(vec!["--config".to_string(), "server.conf".to_string()]).is_err());
+    }
+}

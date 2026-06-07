@@ -352,8 +352,56 @@ mod tests {
     }
 
     #[test]
+    fn client_config_parse_defaults_shell() {
+        let config = ClientConfig::parse(
+            "
+            server = ws://127.0.0.1:8080/agent/default
+            private_key_path = /home/me/.ssh/id_ed25519
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(config.shell, "/bin/sh");
+    }
+
+    #[test]
+    fn client_config_parse_rejects_unknown_key() {
+        assert!(ClientConfig::parse(
+            "
+            server = ws://127.0.0.1:8080/agent/default
+            private_key_path = /home/me/.ssh/id_ed25519
+            typo = nope
+            ",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn client_config_from_args_accepts_positional_hex_key() {
+        let config = ClientConfig::from_args(vec![
+            "ws://127.0.0.1:8080/agent/default".to_string(),
+            "00".repeat(32),
+        ])
+        .unwrap();
+
+        assert_eq!(config.server, "ws://127.0.0.1:8080/agent/default");
+        assert_eq!(config.private_key, PrivateKeyConfig::Hex("00".repeat(32)));
+        assert_eq!(config.shell, "/bin/sh");
+    }
+
+    #[test]
+    fn signing_key_from_hex_rejects_wrong_length() {
+        assert!(signing_key_from_hex("00").is_err());
+    }
+
+    #[test]
     fn decode_hex_round_trips_encoded_bytes() {
         let bytes = [0_u8, 1, 2, 15, 16, 127, 128, 255];
         assert_eq!(decode_hex(&encode_hex(&bytes)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn decode_hex_rejects_odd_length() {
+        assert!(decode_hex("abc").is_err());
     }
 }
