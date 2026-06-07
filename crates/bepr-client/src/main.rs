@@ -210,11 +210,7 @@ impl ClientConfig {
 }
 
 fn default_shell() -> String {
-    if cfg!(windows) {
-        "cmd.exe".to_string()
-    } else {
-        "/bin/sh".to_string()
-    }
+    "/bin/sh".to_string()
 }
 
 fn keygen() -> Result<(), Box<dyn std::error::Error>> {
