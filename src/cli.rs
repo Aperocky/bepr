@@ -1,8 +1,9 @@
-use std::{env, io::IsTerminal};
+use std::{env, io::IsTerminal, time::Duration};
 
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
+    time::sleep,
 };
 
 use crate::{
@@ -48,10 +49,11 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
     let to_daemon = tokio::spawn(async move {
         if stdin_is_terminal {
             let mut stdin = io::BufReader::new(io::stdin());
+            let mut stderr = io::stderr();
             let mut line = Vec::new();
             loop {
-                io::stdout().write_all(b"$ ").await?;
-                io::stdout().flush().await?;
+                stderr.write_all(b"> ").await?;
+                stderr.flush().await?;
                 line.clear();
                 let n = stdin.read_until(b'\n', &mut line).await?;
                 if n == 0 {
@@ -59,6 +61,7 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
                 }
                 writer.write_all(&line).await?;
                 writer.flush().await?;
+                sleep(Duration::from_millis(100)).await;
             }
         } else {
             let mut stdin = io::stdin();
@@ -85,7 +88,7 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
         stdout.flush().await.map_err(|err| err.to_string())?;
     }
     to_daemon.abort();
-    Ok(())
+    std::process::exit(0);
 }
 
 async fn list(args: Vec<String>) -> Result<(), String> {

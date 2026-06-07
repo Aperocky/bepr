@@ -83,26 +83,33 @@ async fn run_once(
         Ok::<_, std::io::Error>(())
     });
 
-    let to_ws = tokio::spawn(async move {
-        while let Some(bytes) = out_rx.recv().await {
-            ws_tx.send(Message::Binary(bytes)).await?;
-        }
-        Ok::<_, tokio_tungstenite::tungstenite::Error>(())
-    });
-
-    while let Some(msg) = ws_rx.next().await {
-        match msg? {
-            Message::Binary(bytes) => child_stdin.write_all(&bytes).await?,
-            Message::Text(text) => child_stdin.write_all(text.as_bytes()).await?,
-            Message::Close(_) => break,
-            _ => {}
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                status?;
+                ws_tx.send(Message::Close(None)).await?;
+                break;
+            }
+            Some(bytes) = out_rx.recv() => {
+                ws_tx.send(Message::Binary(bytes)).await?;
+            }
+            msg = ws_rx.next() => {
+                let Some(msg) = msg else {
+                    break;
+                };
+                match msg? {
+                    Message::Binary(bytes) => child_stdin.write_all(&bytes).await?,
+                    Message::Text(text) => child_stdin.write_all(text.as_bytes()).await?,
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
         }
     }
 
     let _ = child.kill().await;
     stdout_task.abort();
     stderr_task.abort();
-    to_ws.abort();
     Ok(())
 }
 

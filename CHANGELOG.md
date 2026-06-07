@@ -1,7 +1,10 @@
 # Changelog
 
 ### v0.1.4
+- 🐛 Make `exit` in the remote shell close `bepr connect`
+- 🐛 Move the interactive `bepr connect` input prompt to stderr and reduce prompt/output interleaving
 - ⚙️  Write packaged service logs to `/var/log/bepr/server.log` and `/var/log/bepr/client.log`
+- 🧪 Add e2e coverage for interactive terminal prompt behavior
 
 ### v0.1.3
 - ✨ Add local `$ ` prompt for interactive `bepr connect`

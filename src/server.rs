@@ -231,7 +231,7 @@ async fn handle_operator(
     stream.write_all(b"OK\n").await?;
     let (mut reader, mut writer) = stream.into_split();
 
-    let write_task = tokio::spawn(async move {
+    let mut write_task = tokio::spawn(async move {
         while let Some(bytes) = to_operator_rx.recv().await {
             writer.write_all(&bytes).await?;
             writer.flush().await?;
@@ -241,12 +241,20 @@ async fn handle_operator(
 
     let mut buf = [0_u8; 8192];
     loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        if to_client.send(buf[..n].to_vec()).await.is_err() {
-            break;
+        tokio::select! {
+            result = &mut write_task => {
+                result??;
+                break;
+            }
+            read = reader.read(&mut buf) => {
+                let n = read?;
+                if n == 0 {
+                    break;
+                }
+                if to_client.send(buf[..n].to_vec()).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 

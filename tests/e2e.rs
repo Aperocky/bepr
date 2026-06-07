@@ -13,7 +13,7 @@ const OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 
 #[test]
 fn authenticated_client_pipes_shell_output_to_server() {
-    let _test_guard = test_lock().lock().unwrap();
+    let _test_guard = test_lock().lock().unwrap_or_else(|err| err.into_inner());
     build_bin();
     let _socket_guard = TestSocketGuard::new();
 
@@ -78,7 +78,7 @@ fn authenticated_client_pipes_shell_output_to_server() {
         .expect("spawn bepr connect");
     let mut connect = ChildGuard::new(connect);
     let connect_stdout = read_lines(connect.child.stdout.take().unwrap());
-    let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
+    let connect_stderr = read_lines(connect.child.stderr.take().unwrap());
 
     writeln!(
         connect.child.stdin.as_mut().expect("connect stdin"),
@@ -87,8 +87,14 @@ fn authenticated_client_pipes_shell_output_to_server() {
     .expect("write command to connect stdin");
 
     assert_line_contains(&connect_stdout, "bepr-integ-ok", Duration::from_secs(5));
+    assert_no_line_contains(&connect_stdout, "> ", Duration::from_millis(250));
+    assert_no_line_contains(&connect_stderr, "> ", Duration::from_millis(250));
 
-    connect.kill();
+    writeln!(connect.child.stdin.as_mut().expect("connect stdin"), "exit")
+        .expect("write exit to connect stdin");
+    assert_line_contains(&server_stderr, "disconnected default", Duration::from_secs(5));
+    wait_for_child_exit(&mut connect.child, Duration::from_secs(5));
+
     client.kill();
     server.kill();
     let _ = fs::remove_file(server_config_path);
@@ -100,7 +106,7 @@ fn authenticated_client_pipes_shell_output_to_server() {
 
 #[test]
 fn client_disconnect_clears_session_and_allows_reconnect() {
-    let _test_guard = test_lock().lock().unwrap();
+    let _test_guard = test_lock().lock().unwrap_or_else(|err| err.into_inner());
     build_bin();
     let _socket_guard = TestSocketGuard::new();
 
@@ -204,6 +210,81 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
     let _ = fs::remove_dir_all(key_dir);
 }
 
+#[test]
+fn terminal_connect_shows_input_prompt_and_exits() {
+    let _test_guard = test_lock().lock().unwrap_or_else(|err| err.into_inner());
+    build_bin();
+    let _socket_guard = TestSocketGuard::new();
+
+    if !has_script_command() {
+        eprintln!("skipping terminal prompt test: script command not found");
+        return;
+    }
+
+    let port = free_port();
+    let private_key_path = temp_file("bepr-tty-id-ed25519");
+    generate_ed25519_key(&private_key_path);
+    let public_key_path = PathBuf::from(format!("{}.pub", private_key_path.display()));
+    let key_dir = temp_dir("bepr-tty-keys");
+    fs::create_dir(&key_dir).expect("create key dir");
+    fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
+    let server_config_path = write_server_config(port, &key_dir);
+    let client_config_path = write_client_config(port, &private_key_path);
+    let bepr_bin = bin_path("bepr");
+
+    let server = Command::new(&bepr_bin)
+        .arg("server")
+        .arg("--config")
+        .arg(&server_config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr server");
+    let mut server = ChildGuard::new(server);
+
+    let server_stderr = read_lines(server.child.stderr.take().unwrap());
+    wait_for_tcp(port);
+
+    let client = Command::new(&bepr_bin)
+        .arg("client")
+        .arg("--config")
+        .arg(&client_config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bepr client");
+    let mut client = ChildGuard::new(client);
+
+    let _client_stderr = read_lines(client.child.stderr.take().unwrap());
+    assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(5));
+
+    let mut connect = spawn_tty_connect(&bepr_bin, "default").expect("spawn tty bepr connect");
+    let connect_stdout = read_chunks(connect.child.stdout.take().unwrap());
+    let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
+
+    assert_chunk_contains(&connect_stdout, "> ", Duration::from_secs(5));
+    writeln!(
+        connect.child.stdin.as_mut().expect("connect stdin"),
+        "printf 'bepr-tty-ok\\n'"
+    )
+    .expect("write command to tty connect stdin");
+    assert_chunk_contains(&connect_stdout, "bepr-tty-ok", Duration::from_secs(5));
+
+    writeln!(connect.child.stdin.as_mut().expect("connect stdin"), "exit")
+        .expect("write exit to tty connect stdin");
+    wait_for_child_exit(&mut connect.child, Duration::from_secs(5));
+
+    client.kill();
+    server.kill();
+    let _ = fs::remove_file(server_config_path);
+    let _ = fs::remove_file(client_config_path);
+    let _ = fs::remove_file(private_key_path);
+    let _ = fs::remove_file(public_key_path);
+    let _ = fs::remove_dir_all(key_dir);
+}
+
 fn build_bin() {
     static BUILD: OnceLock<()> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -213,6 +294,45 @@ fn build_bin() {
             .expect("run cargo build");
         assert!(status.success(), "cargo build failed");
     });
+}
+
+fn has_script_command() -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg("command -v script >/dev/null 2>&1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn spawn_tty_connect(bepr_bin: &PathBuf, client_id: &str) -> std::io::Result<ChildGuard> {
+    let mut command = Command::new("script");
+    if cfg!(target_os = "macos") {
+        command
+            .arg("-q")
+            .arg("/dev/null")
+            .arg(bepr_bin)
+            .arg("connect")
+            .arg(client_id);
+    } else {
+        command
+            .arg("-q")
+            .arg("-c")
+            .arg(format!("{} connect {}", shell_quote(bepr_bin), client_id))
+            .arg("/dev/null");
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map(ChildGuard::new)
+}
+
+fn shell_quote(path: &PathBuf) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
 fn bin_path(name: &str) -> PathBuf {
@@ -307,6 +427,24 @@ fn read_lines<R: std::io::Read + Send + 'static>(reader: R) -> mpsc::Receiver<St
     rx
 }
 
+fn read_chunks<R: std::io::Read + Send + 'static>(mut reader: R) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let _ = tx.send(chunk);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
 fn assert_line_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     let mut seen = Vec::new();
@@ -319,6 +457,53 @@ fn assert_line_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Dura
         }
     }
     panic!("did not see {needle:?}; saw {seen:?}");
+}
+
+fn assert_chunk_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => {
+                seen.push_str(&chunk);
+                if seen.contains(needle) {
+                    return;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    panic!("did not see {needle:?}; saw {seen:?}");
+}
+
+fn assert_no_line_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) if line.contains(needle) => {
+                panic!("saw unexpected {needle:?} in {line:?}; saw {seen:?}");
+            }
+            Ok(line) => seen.push(line),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match child.try_wait().expect("check child exit") {
+            Some(status) => {
+                assert!(status.success(), "child exited with {status}");
+                return;
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    panic!("child did not exit");
 }
 
 fn test_lock() -> &'static StdMutex<()> {
