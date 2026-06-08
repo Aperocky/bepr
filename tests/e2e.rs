@@ -263,7 +263,7 @@ fn terminal_connect_pipes_tty_input_and_exits() {
     let connect_stdout = read_chunks(connect.child.stdout.take().unwrap());
     let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
 
-    assert_chunk_contains(&connect_stdout, "$", Duration::from_secs(5));
+    assert_chunk_contains_any(&connect_stdout, &["$ ", "# "], Duration::from_secs(5));
     write!(
         connect.child.stdin.as_mut().expect("connect stdin"),
         "printf 'bepr-tty-ok\\n'\r"
@@ -474,6 +474,28 @@ fn assert_chunk_contains(rx: &mpsc::Receiver<String>, needle: &str, timeout: Dur
         }
     }
     panic!("did not see {needle:?}; saw {seen:?}");
+}
+
+fn assert_chunk_contains_any(
+    rx: &mpsc::Receiver<String>,
+    needles: &[&str],
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => {
+                seen.push_str(&chunk);
+                if needles.iter().any(|needle| seen.contains(needle)) {
+                    return;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    panic!("did not see any of {needles:?}; saw {seen:?}");
 }
 
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) {
