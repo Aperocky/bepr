@@ -4,7 +4,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
 
@@ -31,10 +31,11 @@ pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
 pub const DEFAULT_BIND: &str = "127.0.0.1:25223";
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
+const KEY_RELOAD_INTERVAL_MS: u64 = 300_000;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 
-type PublicKeys = Arc<HashMap<String, VerifyingKey>>;
+type PublicKeys = Arc<StdMutex<HashMap<String, VerifyingKey>>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
 #[derive(Clone)]
@@ -46,7 +47,9 @@ struct Session {
 
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let config = ServerConfig::from_args(args).map_err(|err| err.to_string())?;
-    let keys = Arc::new(config.load_public_keys().map_err(|err| err.to_string())?);
+    let keys = Arc::new(StdMutex::new(
+        config.load_public_keys().map_err(|err| err.to_string())?,
+    ));
     let sessions = Sessions::default();
     let tcp = TcpListener::bind(&config.bind).await.map_err(|err| err.to_string())?;
     prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
@@ -54,6 +57,23 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
 
     eprintln!("listening on ws://{}/bepr/<client_id>", config.bind);
     eprintln!("operator socket {}", DEFAULT_OPERATOR_SOCKET);
+
+    {
+        let keys = keys.clone();
+        let key_dir = config.key_dir.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_millis(KEY_RELOAD_INTERVAL_MS));
+            loop {
+                ticker.tick().await;
+                match load_key_dir(&key_dir).map_err(|err| err.to_string()) {
+                    Ok(reloaded) => {
+                        *keys.lock().unwrap() = reloaded;
+                    }
+                    Err(err) => eprintln!("key reload: {err}"),
+                }
+            }
+        });
+    }
 
     loop {
         tokio::select! {
@@ -87,21 +107,29 @@ async fn handle_agent(
     keys: PublicKeys,
     sessions: Sessions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut client_id = None;
-    let ws = accept_hdr_async(stream, |req: &Request, resp: Response| {
+    let client_id = Arc::new(StdMutex::new(None));
+    let handshake_keys = keys.clone();
+    let handshake_client_id = client_id.clone();
+    let ws = accept_hdr_async(stream, move |req: &Request, resp: Response| {
         let Some(id) = req.uri().path().strip_prefix("/bepr/") else {
             return Err(error_response(StatusCode::NOT_FOUND, "unknown endpoint"));
         };
-        if !keys.contains_key(id) {
+        if !handshake_keys.lock().unwrap().contains_key(id) {
             return Err(error_response(StatusCode::UNAUTHORIZED, "unknown client"));
         }
-        client_id = Some(id.to_string());
+        *handshake_client_id.lock().unwrap() = Some(id.to_string());
         Ok(resp)
     })
     .await?;
 
-    let client_id = client_id.ok_or("missing client id after handshake")?;
+    let client_id = client_id
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("missing client id after handshake")?;
     let public_key = keys
+        .lock()
+        .unwrap()
         .get(&client_id)
         .copied()
         .ok_or("missing client key after handshake")?;
@@ -294,9 +322,10 @@ async fn list_sessions(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lines = Vec::new();
     {
+        let client_ids = keys.lock().unwrap().keys().cloned().collect::<Vec<_>>();
         let sessions = sessions.lock().await;
-        for client_id in keys.keys() {
-            let state = if sessions.contains_key(client_id) {
+        for client_id in client_ids {
+            let state = if sessions.contains_key(&client_id) {
                 "connected"
             } else {
                 "disconnected"
@@ -505,6 +534,10 @@ fn read_ssh_string(input: &[u8]) -> Result<(&[u8], &[u8]), Box<dyn std::error::E
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::AsyncReadExt,
+        net::UnixStream,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -576,6 +609,53 @@ mod tests {
         assert!(!keys.contains_key("ignored"));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_uses_current_public_keys_map() {
+        let keys = Arc::new(StdMutex::new(HashMap::from([(
+            "laptop".to_string(),
+            parse_openssh_ed25519_public_key(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPPixtDFSIPO+YfoD8qk2AQFNAfh7NuizV5cdQ0ii4CI\n",
+            )
+            .unwrap(),
+        )])));
+        let sessions = Sessions::default();
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let keys_for_task = keys.clone();
+        let sessions_for_task = sessions.clone();
+        let task = tokio::spawn(async move {
+            list_sessions(server, keys_for_task, sessions_for_task).await.unwrap();
+        });
+
+        let mut first = Vec::new();
+        client.read_to_end(&mut first).await.unwrap();
+        task.await.unwrap();
+        let first = String::from_utf8(first).unwrap();
+        assert!(first.contains("laptop\tdisconnected"));
+
+        *keys.lock().unwrap() = HashMap::from([(
+            "pi".to_string(),
+            parse_openssh_ed25519_public_key(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPPixtDFSIPO+YfoD8qk2AQFNAfh7NuizV5cdQ0ii4CI\n",
+            )
+            .unwrap(),
+        )]);
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let keys_for_task = keys.clone();
+        let sessions_for_task = sessions.clone();
+        let task = tokio::spawn(async move {
+            list_sessions(server, keys_for_task, sessions_for_task).await.unwrap();
+        });
+
+        let mut second = Vec::new();
+        client.read_to_end(&mut second).await.unwrap();
+        task.await.unwrap();
+        let second = String::from_utf8(second).unwrap();
+        assert!(second.contains("pi\tdisconnected"));
+        assert!(!second.contains("laptop\tdisconnected"));
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {

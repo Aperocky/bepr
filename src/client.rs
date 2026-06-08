@@ -19,7 +19,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         if let Err(err) = run_once(&config.server, &key, &config.shell).await {
             eprintln!("{err}");
         }
-        sleep(Duration::from_secs(3)).await;
+        sleep(Duration::from_secs(10)).await;
     }
 }
 
