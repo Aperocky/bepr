@@ -210,7 +210,7 @@ async fn handle_operator(
         return Ok(());
     };
     let client_id = client_id.to_string();
-    let (to_client, mut to_operator_rx, to_operator_tx, pending_output) = {
+    let (to_client, mut to_operator_rx, pending_output) = {
         let mut sessions = sessions.lock().await;
         let Some(session) = sessions.get_mut(&client_id) else {
             stream.write_all(b"ERR no such client\n").await?;
@@ -222,17 +222,17 @@ async fn handle_operator(
         }
         let (to_operator_tx, to_operator_rx) = mpsc::channel::<Vec<u8>>(32);
         let pending_output = std::mem::take(&mut session.pending_output);
-        session.to_operator = Some(to_operator_tx.clone());
-        (
-            session.to_client.clone(),
-            to_operator_rx,
-            to_operator_tx,
-            pending_output,
-        )
+        session.to_operator = Some(to_operator_tx);
+        (session.to_client.clone(), to_operator_rx, pending_output)
     };
 
     stream.write_all(b"OK\n").await?;
     let (mut reader, mut writer) = stream.into_split();
+
+    if !pending_output.is_empty() {
+        writer.write_all(&pending_output).await?;
+        writer.flush().await?;
+    }
 
     let mut write_task = tokio::spawn(async move {
         while let Some(bytes) = to_operator_rx.recv().await {
@@ -241,11 +241,6 @@ async fn handle_operator(
         }
         Ok::<_, std::io::Error>(())
     });
-
-    if !pending_output.is_empty() {
-        let _ = to_operator_tx.send(pending_output).await;
-    }
-    drop(to_operator_tx);
 
     let mut buf = [0_u8; 8192];
     loop {
