@@ -11,12 +11,15 @@ use std::{
 use base64ct::{Base64, Encoding};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
+use rustls::ServerConfig as RustlsServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UnixListener, UnixStream},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, UnixListener, UnixStream},
     sync::{mpsc, oneshot, Mutex},
     time::interval,
 };
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::{
@@ -38,6 +41,7 @@ const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 type PublicKeys = Arc<StdMutex<HashMap<String, VerifyingKey>>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
+
 #[derive(Clone)]
 struct Session {
     to_client: mpsc::Sender<Vec<u8>>,
@@ -50,26 +54,34 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     let keys = Arc::new(StdMutex::new(
         config.load_public_keys().map_err(|err| err.to_string())?,
     ));
+    let tls_acceptor = Arc::new(StdMutex::new(
+        load_tls_acceptor(&config.tls_cert, &config.tls_key).map_err(|err| err.to_string())?,
+    ));
     let sessions = Sessions::default();
     let tcp = TcpListener::bind(&config.bind).await.map_err(|err| err.to_string())?;
     prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
     let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
-    eprintln!("listening on ws://{}/bepr/<client_id>", config.bind);
+    eprintln!("listening on wss://{}/bepr/<client_id>", config.bind);
     eprintln!("operator socket {}", DEFAULT_OPERATOR_SOCKET);
 
     {
         let keys = keys.clone();
+        let tls_acceptor = tls_acceptor.clone();
         let key_dir = config.key_dir.clone();
+        let tls_cert = config.tls_cert.clone();
+        let tls_key = config.tls_key.clone();
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(KEY_RELOAD_INTERVAL_MS));
             loop {
                 ticker.tick().await;
-                match load_key_dir(&key_dir).map_err(|err| err.to_string()) {
-                    Ok(reloaded) => {
-                        *keys.lock().unwrap() = reloaded;
-                    }
+                match load_key_dir(&key_dir) {
+                    Ok(reloaded) => *keys.lock().unwrap() = reloaded,
                     Err(err) => eprintln!("key reload: {err}"),
+                }
+                match load_tls_acceptor(&tls_cert, &tls_key) {
+                    Ok(reloaded) => *tls_acceptor.lock().unwrap() = reloaded,
+                    Err(err) => eprintln!("tls cert reload: {err}"),
                 }
             }
         });
@@ -79,10 +91,15 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         tokio::select! {
             accepted = tcp.accept() => {
                 let (stream, addr) = accepted.map_err(|err| err.to_string())?;
+                let acceptor = tls_acceptor.lock().unwrap().clone();
                 let keys = keys.clone();
                 let sessions = sessions.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_agent(stream, addr, keys, sessions).await {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(err) => { eprintln!("{addr}: TLS: {err}"); return; }
+                    };
+                    if let Err(err) = handle_agent(tls_stream, addr, keys, sessions).await {
                         eprintln!("{addr}: {err}");
                     }
                 });
@@ -101,12 +118,15 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-async fn handle_agent(
-    stream: TcpStream,
+async fn handle_agent<S>(
+    stream: S,
     addr: SocketAddr,
     keys: PublicKeys,
     sessions: Sessions,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let client_id = Arc::new(StdMutex::new(None));
     let handshake_keys = keys.clone();
     let handshake_client_id = client_id.clone();
@@ -361,6 +381,8 @@ fn env_u64(name: &str, default: u64) -> u64 {
 pub struct ServerConfig {
     pub bind: String,
     pub key_dir: String,
+    pub tls_cert: String,
+    pub tls_key: String,
 }
 
 impl ServerConfig {
@@ -379,6 +401,8 @@ impl ServerConfig {
     fn parse(input: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut bind = None;
         let mut key_dir = None;
+        let mut tls_cert = None;
+        let mut tls_key = None;
 
         for (idx, line) in input.lines().enumerate() {
             let line = line.trim();
@@ -396,6 +420,8 @@ impl ServerConfig {
             match key {
                 "bind" => bind = Some(value.to_string()),
                 "key_dir" => key_dir = Some(value.to_string()),
+                "tls_cert" => tls_cert = Some(value.to_string()),
+                "tls_key" => tls_key = Some(value.to_string()),
                 _ => return Err(format!("config:{} unknown key {key}", idx + 1).into()),
             }
         }
@@ -403,12 +429,30 @@ impl ServerConfig {
         Ok(Self {
             bind: bind.unwrap_or_else(|| DEFAULT_BIND.to_string()),
             key_dir: key_dir.ok_or("config missing key_dir")?,
+            tls_cert: tls_cert.ok_or("config missing tls_cert")?,
+            tls_key: tls_key.ok_or("config missing tls_key")?,
         })
     }
 
     fn load_public_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error>> {
         load_key_dir(&self.key_dir)
     }
+}
+
+fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+    let cert_pem = fs::read(cert_path)?;
+    let key_pem = fs::read(key_path)?;
+
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .collect::<Result<_, _>>()?;
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_pem.as_slice())?
+        .ok_or("no private key found in tls_key file")?;
+
+    let config = RustlsServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 fn prepare_operator_socket(path: &str) -> std::io::Result<()> {
@@ -467,10 +511,13 @@ fn parse_openssh_ed25519_public_key(
     Ok(VerifyingKey::from_bytes(&key_bytes)?)
 }
 
-async fn authenticate(
-    mut ws: WebSocketStream<TcpStream>,
+async fn authenticate<S>(
+    mut ws: WebSocketStream<S>,
     public_key: VerifyingKey,
-) -> Result<WebSocketStream<TcpStream>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<WebSocketStream<S>, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut challenge = [0_u8; 32];
     getrandom::getrandom(&mut challenge)?;
     ws.send(Message::Binary(challenge.to_vec())).await?;
@@ -541,22 +588,28 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn server_config_parse_reads_bind_and_key_dir() {
+    fn server_config_parse_reads_all_fields() {
         let config = ServerConfig::parse(
             "
             bind = 0.0.0.0:8080
             key_dir = /etc/bepr/keys
+            tls_cert = /etc/bepr/tls/cert.pem
+            tls_key = /etc/bepr/tls/key.pem
             ",
         )
         .unwrap();
 
         assert_eq!(config.bind, "0.0.0.0:8080");
         assert_eq!(config.key_dir, "/etc/bepr/keys");
+        assert_eq!(config.tls_cert, "/etc/bepr/tls/cert.pem");
+        assert_eq!(config.tls_key, "/etc/bepr/tls/key.pem");
     }
 
     #[test]
     fn server_config_parse_defaults_bind() {
-        let config = ServerConfig::parse("key_dir = /etc/bepr/keys").unwrap();
+        let config = ServerConfig::parse(
+            "key_dir = /etc/bepr/keys\ntls_cert = /etc/bepr/tls/cert.pem\ntls_key = /etc/bepr/tls/key.pem\n"
+        ).unwrap();
 
         assert_eq!(config.bind, DEFAULT_BIND);
         assert_eq!(config.key_dir, "/etc/bepr/keys");
@@ -564,15 +617,33 @@ mod tests {
 
     #[test]
     fn server_config_parse_requires_key_dir() {
-        assert!(ServerConfig::parse("bind = 127.0.0.1:8080").is_err());
+        assert!(ServerConfig::parse(
+            "bind = 127.0.0.1:8080\ntls_cert = /etc/bepr/tls/cert.pem\ntls_key = /etc/bepr/tls/key.pem\n"
+        ).is_err());
     }
 
     #[test]
-    fn server_config_parse_rejects_operator_socket_key() {
+    fn server_config_parse_requires_tls_cert() {
+        assert!(ServerConfig::parse(
+            "bind = 127.0.0.1:8080\nkey_dir = /etc/bepr/keys\ntls_key = /etc/bepr/tls/key.pem\n"
+        ).is_err());
+    }
+
+    #[test]
+    fn server_config_parse_requires_tls_key() {
+        assert!(ServerConfig::parse(
+            "bind = 127.0.0.1:8080\nkey_dir = /etc/bepr/keys\ntls_cert = /etc/bepr/tls/cert.pem\n"
+        ).is_err());
+    }
+
+    #[test]
+    fn server_config_parse_rejects_unknown_key() {
         assert!(ServerConfig::parse(
             "
             bind = 127.0.0.1:8080
             key_dir = /etc/bepr/keys
+            tls_cert = /etc/bepr/tls/cert.pem
+            tls_key = /etc/bepr/tls/key.pem
             operator_socket = /tmp/other.sock
             ",
         )
