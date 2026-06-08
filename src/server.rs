@@ -44,6 +44,10 @@ const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 type PublicKeys = Arc<StdMutex<HashMap<String, VerifyingKey>>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
+enum ConnPath {
+    Client(String),
+    User(String),
+}
 
 #[derive(Clone)]
 struct Session {
@@ -57,6 +61,9 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     let keys = Arc::new(StdMutex::new(
         config.load_public_keys().map_err(|err| err.to_string())?,
     ));
+    let user_keys = Arc::new(StdMutex::new(
+        config.load_user_keys().map_err(|err| err.to_string())?,
+    ));
     let tls_acceptor = Arc::new(StdMutex::new(
         load_tls_acceptor(&config.tls_cert, &config.tls_key).map_err(|err| err.to_string())?,
     ));
@@ -67,13 +74,18 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     restrict_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
     log(format!("listening on wss://{}/bepr/client/<client_id>", config.bind));
+    if config.user_key_dir.is_some() {
+        log(format!("user endpoint wss://{}/bepr/user/<user_id>", config.bind));
+    }
     log(format!("operator socket {}", DEFAULT_OPERATOR_SOCKET));
 
     {
         let keys = keys.clone();
+        let user_keys = user_keys.clone();
         let tls_acceptor = tls_acceptor.clone();
         let sessions = sessions.clone();
         let key_dir = config.key_dir.clone();
+        let user_key_dir = config.user_key_dir.clone();
         let tls_cert = config.tls_cert.clone();
         let tls_key = config.tls_key.clone();
         tokio::spawn(async move {
@@ -83,6 +95,12 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 match load_key_dir(&key_dir) {
                     Ok(reloaded) => *keys.lock().unwrap() = reloaded,
                     Err(err) => log(format!("key reload: {err}")),
+                }
+                if let Some(ref dir) = user_key_dir {
+                    match load_key_dir(dir) {
+                        Ok(reloaded) => *user_keys.lock().unwrap() = reloaded,
+                        Err(err) => log(format!("user key reload: {err}")),
+                    }
                 }
                 match load_tls_acceptor(&tls_cert, &tls_key) {
                     Ok(reloaded) => *tls_acceptor.lock().unwrap() = reloaded,
@@ -102,15 +120,14 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 let (stream, addr) = accepted.map_err(|err| err.to_string())?;
                 let acceptor = tls_acceptor.lock().unwrap().clone();
                 let keys = keys.clone();
+                let user_keys = user_keys.clone();
                 let sessions = sessions.clone();
                 tokio::spawn(async move {
                     let tls_stream = match acceptor.accept(stream).await {
                         Ok(s) => s,
                         Err(err) => { log(format!("{addr}: TLS: {err}")); return; }
                     };
-                    if let Err(err) = handle_agent(tls_stream, addr, keys, sessions).await {
-                        log(format!("{addr}: {err}"));
-                    }
+                    accept_connection(tls_stream, addr, keys, user_keys, sessions).await;
                 });
             }
             accepted = ops.accept() => {
@@ -127,49 +144,86 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-async fn handle_agent<S>(
+async fn accept_connection<S>(
     stream: S,
     addr: SocketAddr,
-    keys: PublicKeys,
+    client_keys: PublicKeys,
+    user_keys: PublicKeys,
+    sessions: Sessions,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let conn_path = Arc::new(StdMutex::new(None::<ConnPath>));
+    let cp = conn_path.clone();
+    let cp_client_keys = client_keys.clone();
+    let cp_user_keys = user_keys.clone();
+
+    let ws = accept_hdr_async(stream, move |req: &Request, resp: Response| {
+        let path = req.uri().path();
+        let conn = if let Some(id) = path.strip_prefix("/bepr/client/") {
+            if id.is_empty() || id.contains('/') {
+                return Err(error_response(StatusCode::BAD_REQUEST, "invalid client id"));
+            }
+            if !cp_client_keys.lock().unwrap().contains_key(id) {
+                return Err(error_response(StatusCode::UNAUTHORIZED, "unknown client"));
+            }
+            ConnPath::Client(id.to_string())
+        } else if let Some(id) = path.strip_prefix("/bepr/user/") {
+            if id.is_empty() || id.contains('/') {
+                return Err(error_response(StatusCode::BAD_REQUEST, "invalid user id"));
+            }
+            if !cp_user_keys.lock().unwrap().contains_key(id) {
+                return Err(error_response(StatusCode::UNAUTHORIZED, "unknown user"));
+            }
+            ConnPath::User(id.to_string())
+        } else if let Some(id) = path.strip_prefix("/bepr/") {
+            if id.is_empty() || id.contains('/') || id == "client" || id == "user" {
+                return Err(error_response(StatusCode::BAD_REQUEST, "invalid client id"));
+            }
+            if !cp_client_keys.lock().unwrap().contains_key(id) {
+                return Err(error_response(StatusCode::UNAUTHORIZED, "unknown client"));
+            }
+            ConnPath::Client(id.to_string())
+        } else {
+            return Err(error_response(StatusCode::NOT_FOUND, "unknown endpoint"));
+        };
+        *cp.lock().unwrap() = Some(conn);
+        Ok(resp)
+    }).await;
+
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(err) => { log(format!("{addr}: {err}")); return; }
+    };
+
+    let conn = conn_path.lock().unwrap().take();
+    match conn {
+        Some(ConnPath::Client(id)) => {
+            let Some(key) = client_keys.lock().unwrap().get(&id).copied() else { return; };
+            if let Err(err) = handle_agent(ws, addr, id, key, sessions).await {
+                log(format!("{addr}: {err}"));
+            }
+        }
+        Some(ConnPath::User(id)) => {
+            let Some(key) = user_keys.lock().unwrap().get(&id).copied() else { return; };
+            if let Err(err) = handle_network_operator(ws, addr, id, key, client_keys, sessions).await {
+                log(format!("{addr}: {err}"));
+            }
+        }
+        None => {}
+    }
+}
+
+async fn handle_agent<S>(
+    ws: WebSocketStream<S>,
+    addr: SocketAddr,
+    client_id: String,
+    public_key: VerifyingKey,
     sessions: Sessions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let client_id = Arc::new(StdMutex::new(None));
-    let handshake_keys = keys.clone();
-    let handshake_client_id = client_id.clone();
-    let ws = accept_hdr_async(stream, move |req: &Request, resp: Response| {
-        let path = req.uri().path();
-        let id = if let Some(id) = path.strip_prefix("/bepr/client/") {
-            id
-        } else if let Some(id) = path.strip_prefix("/bepr/") {
-            id
-        } else {
-            return Err(error_response(StatusCode::NOT_FOUND, "unknown endpoint"));
-        };
-        if id.is_empty() || id.contains('/') || id == "client" || id == "user" {
-            return Err(error_response(StatusCode::BAD_REQUEST, "invalid client id"));
-        }
-        if !handshake_keys.lock().unwrap().contains_key(id) {
-            return Err(error_response(StatusCode::UNAUTHORIZED, "unknown client"));
-        }
-        *handshake_client_id.lock().unwrap() = Some(id.to_string());
-        Ok(resp)
-    })
-    .await?;
-
-    let client_id = client_id
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("missing client id after handshake")?;
-    let public_key = keys
-        .lock()
-        .unwrap()
-        .get(&client_id)
-        .copied()
-        .ok_or("missing client key after handshake")?;
     let ws = timeout(Duration::from_secs(30), authenticate(ws, public_key))
         .await
         .map_err(|_| "authentication timed out")??;
@@ -335,6 +389,151 @@ async fn handle_operator(
     Ok(())
 }
 
+async fn handle_network_operator<S>(
+    ws: WebSocketStream<S>,
+    addr: SocketAddr,
+    user_id: String,
+    public_key: VerifyingKey,
+    client_keys: PublicKeys,
+    sessions: Sessions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut ws = timeout(Duration::from_secs(30), authenticate(ws, public_key))
+        .await
+        .map_err(|_| "authentication timed out")??;
+    log(format!("{addr}: operator authenticated {user_id}"));
+
+    let Some(msg) = ws.next().await else {
+        return Err("operator disconnected before command".into());
+    };
+    let command = match msg? {
+        Message::Binary(b) => String::from_utf8(b)?,
+        Message::Text(t) => t.to_string(),
+        _ => return Err("expected command".into()),
+    };
+    let command = command.trim();
+
+    if command == "LIST" {
+        return list_network_sessions(ws, client_keys, sessions).await;
+    }
+
+    let Some(client_id) = command.strip_prefix("CONNECT ") else {
+        ws.send(Message::Binary(b"ERR unknown command\n".to_vec())).await?;
+        return Ok(());
+    };
+    let client_id = client_id.trim().to_string();
+
+    let (to_client, mut to_operator_rx, pending_output) = {
+        let mut sessions = sessions.lock().await;
+        let Some(session) = sessions.get_mut(&client_id) else {
+            ws.send(Message::Binary(b"ERR no such client\n".to_vec())).await?;
+            return Ok(());
+        };
+        if session.to_operator.is_some() {
+            ws.send(Message::Binary(b"ERR already attached\n".to_vec())).await?;
+            return Ok(());
+        }
+        let (to_operator_tx, to_operator_rx) = mpsc::channel::<Vec<u8>>(32);
+        let pending_output = std::mem::take(&mut session.pending_output);
+        session.to_operator = Some(to_operator_tx);
+        (session.to_client.clone(), to_operator_rx, pending_output)
+    };
+
+    if ws.send(Message::Binary(b"OK\n".to_vec())).await.is_err()
+        || (!pending_output.is_empty()
+            && ws.send(Message::Binary(pending_output)).await.is_err())
+    {
+        if let Some(s) = sessions.lock().await.get_mut(&client_id) {
+            s.to_operator = None;
+        }
+        return Ok(());
+    }
+
+    let last_pong = Arc::new(Mutex::new(Instant::now()));
+    let last_pong_for_task = last_pong.clone();
+    let heartbeat_interval = heartbeat_interval();
+    let heartbeat_timeout = heartbeat_timeout();
+
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    let mut write_task = tokio::spawn(async move {
+        let mut heartbeat = interval(heartbeat_interval);
+        loop {
+            tokio::select! {
+                bytes = to_operator_rx.recv() => {
+                    let Some(bytes) = bytes else { break; };
+                    ws_tx.send(Message::Binary(bytes)).await?;
+                }
+                _ = heartbeat.tick() => {
+                    if last_pong_for_task.lock().await.elapsed() > heartbeat_timeout {
+                        break;
+                    }
+                    ws_tx.send(Message::Ping(vec![])).await?;
+                }
+            }
+        }
+        Ok::<_, tokio_tungstenite::tungstenite::Error>(())
+    });
+
+    loop {
+        tokio::select! {
+            _ = &mut write_task => { break; }
+            msg = ws_rx.next() => {
+                let Some(msg) = msg else { break; };
+                let Ok(msg) = msg else { break; };
+                match msg {
+                    Message::Binary(bytes) => {
+                        if to_client.send(bytes).await.is_err() { break; }
+                    }
+                    Message::Text(text) => {
+                        if to_client.send(text.into_bytes()).await.is_err() { break; }
+                    }
+                    Message::Pong(_) => {
+                        *last_pong.lock().await = Instant::now();
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if let Some(session) = sessions.lock().await.get_mut(&client_id) {
+        session.to_operator = None;
+    }
+    write_task.abort();
+    log(format!("{addr}: operator {user_id} detached from {client_id}"));
+    Ok(())
+}
+
+async fn list_network_sessions<S>(
+    mut ws: WebSocketStream<S>,
+    client_keys: PublicKeys,
+    sessions: Sessions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut lines = Vec::new();
+    {
+        let ids = client_keys.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+        let sessions = sessions.lock().await;
+        for id in ids {
+            let state = if sessions.contains_key(&id) { "connected" } else { "disconnected" };
+            lines.push(format!("{id}\t{state}\n"));
+        }
+    }
+    lines.sort();
+    let mut response = b"OK\n".to_vec();
+    for line in lines {
+        response.extend_from_slice(line.as_bytes());
+    }
+    ws.send(Message::Binary(response)).await?;
+    ws.send(Message::Close(None)).await?;
+    Ok(())
+}
+
 async fn queue_client_output(
     sessions: &Sessions,
     client_id: &str,
@@ -400,6 +599,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 pub struct ServerConfig {
     pub bind: String,
     pub key_dir: String,
+    pub user_key_dir: Option<String>,
     pub tls_cert: String,
     pub tls_key: String,
 }
@@ -420,6 +620,7 @@ impl ServerConfig {
     fn parse(input: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut bind = None;
         let mut key_dir = None;
+        let mut user_key_dir = None;
         let mut tls_cert = None;
         let mut tls_key = None;
 
@@ -437,10 +638,11 @@ impl ServerConfig {
                 return Err(format!("config:{} empty value for {key}", idx + 1).into());
             }
             match key {
-                "bind" => bind = Some(value.to_string()),
-                "key_dir" => key_dir = Some(value.to_string()),
-                "tls_cert" => tls_cert = Some(value.to_string()),
-                "tls_key" => tls_key = Some(value.to_string()),
+                "bind"         => bind         = Some(value.to_string()),
+                "key_dir"      => key_dir      = Some(value.to_string()),
+                "user_key_dir" => user_key_dir = Some(value.to_string()),
+                "tls_cert"     => tls_cert     = Some(value.to_string()),
+                "tls_key"      => tls_key      = Some(value.to_string()),
                 _ => return Err(format!("config:{} unknown key {key}", idx + 1).into()),
             }
         }
@@ -448,6 +650,7 @@ impl ServerConfig {
         Ok(Self {
             bind: bind.unwrap_or_else(|| DEFAULT_BIND.to_string()),
             key_dir: key_dir.ok_or("config missing key_dir")?,
+            user_key_dir,
             tls_cert: tls_cert.ok_or("config missing tls_cert")?,
             tls_key: tls_key.ok_or("config missing tls_key")?,
         })
@@ -455,6 +658,13 @@ impl ServerConfig {
 
     fn load_public_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
         load_key_dir(&self.key_dir)
+    }
+
+    fn load_user_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
+        match self.user_key_dir.as_deref() {
+            Some(dir) => load_key_dir(dir),
+            None => Ok(HashMap::new()),
+        }
     }
 }
 
@@ -575,6 +785,161 @@ mod tests {
         net::UnixStream,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
+    use ed25519_dalek::Signer;
+    use tokio_tungstenite::{accept_async, client_async};
+
+    fn test_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    async fn ws_pair() -> (
+        WebSocketStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+        WebSocketStream<impl AsyncRead + AsyncWrite + Unpin + Send>,
+    ) {
+        let (server_io, client_io) = tokio::io::duplex(65536);
+        let (server_res, client_res) = tokio::join!(
+            accept_async(server_io),
+            client_async("ws://localhost/", client_io),
+        );
+        (server_res.unwrap(), client_res.unwrap().0)
+    }
+
+    async fn do_auth(ws: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>) {
+        let signing_key = test_signing_key();
+        let challenge = match ws.next().await.unwrap().unwrap() {
+            Message::Binary(b) => b,
+            m => panic!("expected challenge, got {m:?}"),
+        };
+        let sig: ed25519_dalek::Signature = signing_key.sign(&challenge);
+        ws.send(Message::Binary(sig.to_bytes().to_vec())).await.unwrap();
+    }
+
+    async fn test_sessions_with_client(client_id: &str) -> (Sessions, mpsc::Receiver<Vec<u8>>) {
+        let sessions = Sessions::default();
+        let (to_client_tx, to_client_rx) = mpsc::channel::<Vec<u8>>(32);
+        sessions.lock().await.insert(client_id.to_string(), Session {
+            to_client: to_client_tx,
+            to_operator: None,
+            pending_output: Vec::new(),
+        });
+        (sessions, to_client_rx)
+    }
+
+    #[tokio::test]
+    async fn network_operator_clears_to_operator_on_abrupt_disconnect() {
+        let signing_key = test_signing_key();
+        let verifying_key = signing_key.verifying_key();
+        let (sessions, _client_rx) = test_sessions_with_client("testclient").await;
+        let client_keys: PublicKeys = Arc::new(StdMutex::new(HashMap::new()));
+
+        let (server_ws, mut client_ws) = ws_pair().await;
+        let sessions_c = sessions.clone();
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let handle = tokio::spawn(async move {
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c).await
+        });
+
+        do_auth(&mut client_ws).await;
+        client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
+
+        match client_ws.next().await.unwrap().unwrap() {
+            Message::Binary(b) if b == b"OK\n" => {}
+            m => panic!("expected OK, got {m:?}"),
+        }
+
+        assert!(sessions.lock().await.get("testclient").unwrap().to_operator.is_some());
+
+        // Abrupt disconnect — drop without sending Close
+        drop(client_ws);
+
+        handle.await.unwrap().ok(); // may return error, that's fine
+        assert!(sessions.lock().await.get("testclient").unwrap().to_operator.is_none(),
+            "to_operator must be cleared after operator disconnects");
+    }
+
+    #[tokio::test]
+    async fn network_operator_allows_reconnect_after_disconnect() {
+        let signing_key = test_signing_key();
+        let verifying_key = signing_key.verifying_key();
+        let (sessions, _client_rx) = test_sessions_with_client("testclient").await;
+        let client_keys: PublicKeys = Arc::new(StdMutex::new(HashMap::new()));
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        // First operator connects then abruptly drops
+        {
+            let (server_ws, mut client_ws) = ws_pair().await;
+            let sessions_c = sessions.clone();
+            let vk = verifying_key;
+            let ck = client_keys.clone();
+            let h = tokio::spawn(async move {
+                handle_network_operator(server_ws, addr, "user1".into(), vk, ck, sessions_c).await
+            });
+            do_auth(&mut client_ws).await;
+            client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
+            match client_ws.next().await.unwrap().unwrap() {
+                Message::Binary(b) if b == b"OK\n" => {}
+                m => panic!("expected OK, got {m:?}"),
+            }
+            drop(client_ws);
+            h.await.unwrap().ok();
+        }
+
+        // Second operator can now attach without "ERR already attached"
+        let (server_ws, mut client_ws) = ws_pair().await;
+        let sessions_c = sessions.clone();
+        let ck = client_keys.clone();
+        let h = tokio::spawn(async move {
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, ck, sessions_c).await
+        });
+        do_auth(&mut client_ws).await;
+        client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
+        let reply = match client_ws.next().await.unwrap().unwrap() {
+            Message::Binary(b) => b,
+            m => panic!("unexpected message {m:?}"),
+        };
+        assert_eq!(reply, b"OK\n", "second operator should attach without 'already attached' error");
+        drop(client_ws);
+        h.await.unwrap().ok();
+    }
+
+    #[tokio::test]
+    async fn network_operator_heartbeat_detaches_unresponsive_operator() {
+        unsafe {
+            std::env::set_var("BEPR_HEARTBEAT_INTERVAL_MS", "50");
+            std::env::set_var("BEPR_HEARTBEAT_TIMEOUT_MS", "120");
+        }
+
+        let signing_key = test_signing_key();
+        let verifying_key = signing_key.verifying_key();
+        let (sessions, _client_rx) = test_sessions_with_client("testclient").await;
+        let client_keys: PublicKeys = Arc::new(StdMutex::new(HashMap::new()));
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        let (server_ws, mut client_ws) = ws_pair().await;
+        let sessions_c = sessions.clone();
+        let handle = tokio::spawn(async move {
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c).await
+        });
+
+        do_auth(&mut client_ws).await;
+        client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
+        match client_ws.next().await.unwrap().unwrap() {
+            Message::Binary(b) if b == b"OK\n" => {}
+            m => panic!("expected OK, got {m:?}"),
+        }
+
+        // Stop responding to pings (hold the ws but don't read)
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        handle.await.unwrap().ok();
+        assert!(sessions.lock().await.get("testclient").unwrap().to_operator.is_none(),
+            "heartbeat timeout must clear to_operator");
+
+        unsafe {
+            std::env::remove_var("BEPR_HEARTBEAT_INTERVAL_MS");
+            std::env::remove_var("BEPR_HEARTBEAT_TIMEOUT_MS");
+        }
+    }
 
     #[test]
     fn server_config_parse_reads_all_fields() {
