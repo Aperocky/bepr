@@ -18,13 +18,12 @@ pub async fn run() -> Result<(), String> {
         Some("client") => client::run(args[1..].to_vec()).await,
         Some("connect") => connect(args[1..].to_vec()).await,
         Some("list") => list(args[1..].to_vec()).await,
-        Some("keygen") => client::keygen().map_err(|err| err.to_string()),
         _ => Err(usage()),
     }
 }
 
 fn usage() -> String {
-    "usage: bepr server [--config server.conf]\n       bepr client [--config client.conf]\n       bepr connect [--socket path] <client_id>\n       bepr list [--socket path]\n       bepr keygen".to_string()
+    "usage: bepr server [--config server.conf]\n       bepr client [--config client.conf]\n       bepr connect [--socket path] <client_id>\n       bepr list [--socket path]".to_string()
 }
 
 async fn connect(args: Vec<String>) -> Result<(), String> {

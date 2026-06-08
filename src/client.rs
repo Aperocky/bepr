@@ -163,18 +163,6 @@ fn default_shell() -> String {
     "/bin/sh".to_string()
 }
 
-pub fn keygen() -> Result<(), Box<dyn std::error::Error>> {
-    let mut seed = [0_u8; 32];
-    getrandom::getrandom(&mut seed)?;
-    let signing_key = SigningKey::from_bytes(&seed);
-    println!("private_key_hex {}", encode_hex(&seed));
-    println!(
-        "public_key_hex  {}",
-        encode_hex(signing_key.verifying_key().as_bytes())
-    );
-    Ok(())
-}
-
 fn load_openssh_ed25519_private_key(
     path: &str,
 ) -> Result<SigningKey, Box<dyn std::error::Error + Send + Sync>> {
@@ -292,6 +280,7 @@ fn hex_val(b: u8) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
     }
 }
 
+#[cfg(test)]
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
