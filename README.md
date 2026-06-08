@@ -49,7 +49,7 @@ Create the server config on the server machine:
 
 ```txt
 # cat /etc/bepr/server.conf
-bind = 0.0.0.0:25223
+bind = 0.0.0.0:443
 key_dir = /etc/bepr/keys
 tls_cert = /etc/bepr/tls/cert.pem
 tls_key  = /etc/bepr/tls/privkey.pem
@@ -59,7 +59,7 @@ Create the client config on the client machine. The path must use the same clien
 
 ```txt
 # cat /etc/bepr/client.conf
-server = wss://server.example:25223/bepr/pi_zero
+server = wss://server.example/bepr/pi_zero
 private_key_path = /etc/bepr/keys/pi_zero.pub
 shell = /bin/sh
 ```

@@ -17,6 +17,8 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, connect_async_tls_with_config, tungstenite::Message};
 
+use crate::util::log;
+
 #[derive(Debug)]
 struct SkipServerVerification;
 
@@ -74,7 +76,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
 
     loop {
         if let Err(err) = run_once(&config.server, &key, &config.shell).await {
-            eprintln!("{err}");
+            log(format!("disconnected: {err}"));
         }
         sleep(Duration::from_secs(10)).await;
     }
@@ -111,6 +113,7 @@ async fn run_once(
     ws.send(Message::Binary(key.sign(&challenge).to_bytes().to_vec()))
         .await?;
 
+    log(format!("connected to {server}"));
     let (pty, pts) = pty_process::open()?;
     let mut child = pty_process::Command::new(shell)
         .env("TERM", "xterm")
@@ -148,6 +151,7 @@ async fn run_once(
     }
 
     let _ = child.kill().await;
+    log(format!("disconnected from {server}"));
     Ok(())
 }
 

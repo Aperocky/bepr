@@ -1,6 +1,7 @@
 mod cli;
 mod client;
 mod server;
+mod util;
 
 #[tokio::main]
 async fn main() {

@@ -1,5 +1,8 @@
 # Changelog
 
+### v0.3.1
+- ⚙️  Default server bind changed to `0.0.0.0:443` — `wss://` URLs no longer need a port
+
 ### v0.3.0
 - 🔒 Add TLS 1.3 support — all client-server traffic is now encrypted over `wss://`
 - 🔒 Enforce `wss://` in client config; `ws://` is not permitted except in end-to-end tests via `BEPR_INSECURE_SKIP_TLS_VERIFY`

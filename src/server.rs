@@ -20,6 +20,8 @@ use tokio::{
     time::interval,
 };
 use tokio_rustls::TlsAcceptor;
+
+use crate::util::log;
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::{
@@ -32,7 +34,7 @@ use tokio_tungstenite::{
 
 pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
-pub const DEFAULT_BIND: &str = "127.0.0.1:25223";
+pub const DEFAULT_BIND: &str = "0.0.0.0:443";
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 const KEY_RELOAD_INTERVAL_MS: u64 = 300_000;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
@@ -62,12 +64,13 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
     let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
-    eprintln!("listening on wss://{}/bepr/<client_id>", config.bind);
-    eprintln!("operator socket {}", DEFAULT_OPERATOR_SOCKET);
+    log(format!("listening on wss://{}/bepr/<client_id>", config.bind));
+    log(format!("operator socket {}", DEFAULT_OPERATOR_SOCKET));
 
     {
         let keys = keys.clone();
         let tls_acceptor = tls_acceptor.clone();
+        let sessions = sessions.clone();
         let key_dir = config.key_dir.clone();
         let tls_cert = config.tls_cert.clone();
         let tls_key = config.tls_key.clone();
@@ -77,11 +80,15 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 ticker.tick().await;
                 match load_key_dir(&key_dir) {
                     Ok(reloaded) => *keys.lock().unwrap() = reloaded,
-                    Err(err) => eprintln!("key reload: {err}"),
+                    Err(err) => log(format!("key reload: {err}")),
                 }
                 match load_tls_acceptor(&tls_cert, &tls_key) {
                     Ok(reloaded) => *tls_acceptor.lock().unwrap() = reloaded,
-                    Err(err) => eprintln!("tls cert reload: {err}"),
+                    Err(err) => log(format!("tls cert reload: {err}")),
+                }
+                let connected: Vec<String> = sessions.lock().await.keys().cloned().collect();
+                if !connected.is_empty() {
+                    log(format!("connected: {}", connected.join(", ")));
                 }
             }
         });
@@ -97,10 +104,10 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 tokio::spawn(async move {
                     let tls_stream = match acceptor.accept(stream).await {
                         Ok(s) => s,
-                        Err(err) => { eprintln!("{addr}: TLS: {err}"); return; }
+                        Err(err) => { log(format!("{addr}: TLS: {err}")); return; }
                     };
                     if let Err(err) = handle_agent(tls_stream, addr, keys, sessions).await {
-                        eprintln!("{addr}: {err}");
+                        log(format!("{addr}: {err}"));
                     }
                 });
             }
@@ -110,7 +117,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 let sessions = sessions.clone();
                 tokio::spawn(async move {
                     if let Err(err) = handle_operator(stream, keys, sessions).await {
-                        eprintln!("operator: {err}");
+                        log(format!("operator: {err}"));
                     }
                 });
             }
@@ -154,7 +161,7 @@ where
         .copied()
         .ok_or("missing client key after handshake")?;
     let ws = authenticate(ws, public_key).await?;
-    eprintln!("{addr}: authenticated {client_id}");
+    log(format!("{addr}: authenticated {client_id}"));
 
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (to_client_tx, mut to_client_rx) = mpsc::channel::<Vec<u8>>(32);
@@ -216,7 +223,7 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        eprintln!("{addr}: {err}");
+                        log(format!("{addr}: {err}"));
                         break;
                     }
                 };
@@ -240,7 +247,7 @@ where
 
     sessions.lock().await.remove(&client_id);
     write_task.abort();
-    eprintln!("{addr}: disconnected {client_for_writer}");
+    log(format!("{addr}: disconnected {client_for_writer}"));
     Ok(())
 }
 
