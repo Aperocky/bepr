@@ -1,5 +1,9 @@
 # Changelog
 
+### v0.2.1
+- ✨ Buffer pending client output so the initial shell prompt is visible on attach
+- 🐛 Translate non-TTY piped input newlines for PTY shell input
+
 ### v0.2.0
 - ✨ Spawn client shells inside a PTY with `pty-process`
 - ✨ Put `bepr connect` terminal input into raw mode for PTY sessions

@@ -30,6 +30,7 @@ use tokio_tungstenite::{
 pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
 pub const DEFAULT_BIND: &str = "127.0.0.1:25223";
+const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
 
@@ -40,6 +41,7 @@ type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 struct Session {
     to_client: mpsc::Sender<Vec<u8>>,
     to_operator: Option<mpsc::Sender<Vec<u8>>>,
+    pending_output: Vec<u8>,
 }
 
 pub async fn run(args: Vec<String>) -> Result<(), String> {
@@ -123,6 +125,7 @@ async fn handle_agent(
             Session {
                 to_client: to_client_tx,
                 to_operator: None,
+                pending_output: Vec::new(),
             },
         );
     }
@@ -179,13 +182,7 @@ async fn handle_agent(
                     Message::Close(_) => break,
                     _ => continue,
                 };
-                let operator = {
-                    sessions
-                        .lock()
-                        .await
-                        .get(&client_id)
-                        .and_then(|session| session.to_operator.clone())
-                };
+                let operator = queue_client_output(&sessions, &client_id, &bytes).await;
                 if let Some(operator) = operator {
                     let _ = operator.send(bytes).await;
                 }
@@ -213,7 +210,7 @@ async fn handle_operator(
         return Ok(());
     };
     let client_id = client_id.to_string();
-    let (to_client, mut to_operator_rx) = {
+    let (to_client, mut to_operator_rx, to_operator_tx, pending_output) = {
         let mut sessions = sessions.lock().await;
         let Some(session) = sessions.get_mut(&client_id) else {
             stream.write_all(b"ERR no such client\n").await?;
@@ -224,8 +221,14 @@ async fn handle_operator(
             return Ok(());
         }
         let (to_operator_tx, to_operator_rx) = mpsc::channel::<Vec<u8>>(32);
-        session.to_operator = Some(to_operator_tx);
-        (session.to_client.clone(), to_operator_rx)
+        let pending_output = std::mem::take(&mut session.pending_output);
+        session.to_operator = Some(to_operator_tx.clone());
+        (
+            session.to_client.clone(),
+            to_operator_rx,
+            to_operator_tx,
+            pending_output,
+        )
     };
 
     stream.write_all(b"OK\n").await?;
@@ -238,6 +241,11 @@ async fn handle_operator(
         }
         Ok::<_, std::io::Error>(())
     });
+
+    if !pending_output.is_empty() {
+        let _ = to_operator_tx.send(pending_output).await;
+    }
+    drop(to_operator_tx);
 
     let mut buf = [0_u8; 8192];
     loop {
@@ -263,6 +271,25 @@ async fn handle_operator(
     }
     write_task.abort();
     Ok(())
+}
+
+async fn queue_client_output(
+    sessions: &Sessions,
+    client_id: &str,
+    bytes: &[u8],
+) -> Option<mpsc::Sender<Vec<u8>>> {
+    let mut sessions = sessions.lock().await;
+    let session = sessions.get_mut(client_id)?;
+    if let Some(operator) = session.to_operator.clone() {
+        return Some(operator);
+    }
+
+    session.pending_output.extend_from_slice(bytes);
+    if session.pending_output.len() > MAX_PENDING_OUTPUT {
+        let excess = session.pending_output.len() - MAX_PENDING_OUTPUT;
+        session.pending_output.drain(..excess);
+    }
+    None
 }
 
 async fn list_sessions(

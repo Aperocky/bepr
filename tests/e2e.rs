@@ -257,19 +257,21 @@ fn terminal_connect_pipes_tty_input_and_exits() {
 
     let _client_stderr = read_lines(client.child.stderr.take().unwrap());
     assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(250));
 
     let mut connect = spawn_tty_connect(&bepr_bin, "default").expect("spawn tty bepr connect");
     let connect_stdout = read_chunks(connect.child.stdout.take().unwrap());
     let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
 
-    writeln!(
+    assert_chunk_contains(&connect_stdout, "$", Duration::from_secs(5));
+    write!(
         connect.child.stdin.as_mut().expect("connect stdin"),
-        "printf 'bepr-tty-ok\\n'"
+        "printf 'bepr-tty-ok\\n'\r"
     )
     .expect("write command to tty connect stdin");
     assert_chunk_contains(&connect_stdout, "bepr-tty-ok", Duration::from_secs(5));
 
-    writeln!(connect.child.stdin.as_mut().expect("connect stdin"), "exit")
+    write!(connect.child.stdin.as_mut().expect("connect stdin"), "exit\r")
         .expect("write exit to tty connect stdin");
     wait_for_child_exit(&mut connect.child, Duration::from_secs(5));
 

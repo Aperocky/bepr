@@ -43,6 +43,7 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
     }
 
     let (mut reader, mut writer) = stream.into_split();
+    let stdin_is_terminal = std::io::stdin().is_terminal();
     let mut raw_terminal = RawTerminal::enable_if_terminal().map_err(|err| err.to_string())?;
     let mut stdout = io::stdout();
 
@@ -54,7 +55,12 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
             if n == 0 {
                 break;
             }
-            writer.write_all(&buf[..n]).await?;
+            if stdin_is_terminal {
+                writer.write_all(&buf[..n]).await?;
+            } else {
+                let bytes = lf_to_cr(&buf[..n]);
+                writer.write_all(&bytes).await?;
+            }
             writer.flush().await?;
         }
         Ok::<_, std::io::Error>(())
@@ -162,6 +168,13 @@ async fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "line is not utf-8"))
 }
 
+fn lf_to_cr(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .map(|byte| if *byte == b'\n' { b'\r' } else { *byte })
+        .collect()
+}
+
 struct RawTerminal {
     original: Option<Termios>,
 }
@@ -264,5 +277,10 @@ mod tests {
     #[test]
     fn parse_list_args_rejects_extra_args() {
         assert!(parse_list_args(vec!["--config".to_string(), "server.conf".to_string()]).is_err());
+    }
+
+    #[test]
+    fn lf_to_cr_translates_piped_newlines_for_pty_input() {
+        assert_eq!(lf_to_cr(b"ls\nexit\n"), b"ls\rexit\r");
     }
 }
