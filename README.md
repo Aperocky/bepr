@@ -2,9 +2,9 @@
 
 A tiny authenticated client/server reverse shell over outbound WebSocket connections.
 
-Single binary cover all 3 mode: server mode, client mode, and operator mode. 1MB in size, 500K - 5M memory usage, virtual PTY so long as your target host has outbound internet access.
+Single binary cover all 3 mode: server mode, client mode, and operator mode. 1MB in size, PTY for all.
 
-Why this came to be: I had to travel, and don't want to expose the computers at home to a dynamic IP or register/paid services. This tiny open source binary packed in all format that I need to consume solves the problem of remote access to home machines and the only requirement is to get one publicly available host in some cloud somewhere. bepr is packaged to covers needed platform support (rpm + dpkg + pkg).
+Why this came to be: I had to travel, and don't want to expose the computers at home to a dynamic IP or register/paid services. This tiny open source binary packed in all format that I need to consume solves the problem of remote access to home machines with wss and the only requirement is to get one publicly available host in some cloud somewhere. bepr is packaged to covers needed platform support (rpm + dpkg + pkg).
 
 ![bepr connection model](assets/bepr-flow.svg)
 
@@ -13,8 +13,7 @@ This is intentionally basic:
 - no enrollment
 - no discovery
 - no per-connection multiplexing
-- multiple clients can be connected at once
-- one shell/operator attachment per client at a time
+- setup for tls, keys are manual
 
 This allows the same binary to serve all purpose and remain extremely compact at some setup cost, in the future if this gets more attention, setup can be improved via additional scaffolding.
 
@@ -45,7 +44,7 @@ Now on the server host, copy the private key you just created:
 
 Now you must create the config, note, under `/etc/bepr`, the installation already created `client.conf.example` and `server.conf.example`. You only need to create one of them:
 
-Create the server config on the server machine:
+Create the server config on the server machine, note you need to get your own tls cert and keys and domain, that part is not covered by `bepr`:
 
 ```txt
 # cat /etc/bepr/server.conf
@@ -121,35 +120,3 @@ This keeps bepr's control socket local to the server. SSH handles remote access 
 ./bepr client --config $client_config_path
 ./bepr connect --socket $socket_file_path $destination
 ```
-
-## Packaging
-
-Packaging files live under `packaging/`.
-
-GitHub Actions builds native Linux packages for x86_64 and arm64, plus a macOS
-pkg, from `.github/workflows/package.yml`.
-
-Build packages from an existing release binary:
-
-```sh
-cargo build --release --locked
-packaging/deb/build.sh
-packaging/rpm/build.sh
-packaging/macos/build.sh
-```
-
-The packages install:
-
-```txt
-/usr/bin/bepr                         # deb/rpm
-/usr/local/bin/bepr                   # macOS pkg
-/etc/bepr/server.conf.example
-/etc/bepr/client.conf.example
-/etc/bepr/keys/
-/var/log/bepr/
-/lib/systemd/system/bepr.service      # deb
-/usr/lib/systemd/system/bepr.service  # rpm
-/Library/LaunchDaemons/com.bepr.plist # macOS pkg
-```
-
-Packages install service files but do not enable or start them.
