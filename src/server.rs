@@ -66,7 +66,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
     restrict_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
-    log(format!("listening on wss://{}/bepr/<client_id>", config.bind));
+    log(format!("listening on wss://{}/bepr/client/<client_id>", config.bind));
     log(format!("operator socket {}", DEFAULT_OPERATOR_SOCKET));
 
     {
@@ -140,9 +140,17 @@ where
     let handshake_keys = keys.clone();
     let handshake_client_id = client_id.clone();
     let ws = accept_hdr_async(stream, move |req: &Request, resp: Response| {
-        let Some(id) = req.uri().path().strip_prefix("/bepr/") else {
+        let path = req.uri().path();
+        let id = if let Some(id) = path.strip_prefix("/bepr/client/") {
+            id
+        } else if let Some(id) = path.strip_prefix("/bepr/") {
+            id
+        } else {
             return Err(error_response(StatusCode::NOT_FOUND, "unknown endpoint"));
         };
+        if id.is_empty() || id.contains('/') || id == "client" || id == "user" {
+            return Err(error_response(StatusCode::BAD_REQUEST, "invalid client id"));
+        }
         if !handshake_keys.lock().unwrap().contains_key(id) {
             return Err(error_response(StatusCode::UNAUTHORIZED, "unknown client"));
         }

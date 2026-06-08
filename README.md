@@ -58,12 +58,12 @@ Create the client config on the client machine. The path must use the same clien
 
 ```txt
 # cat /etc/bepr/client.conf
-server = wss://server.example/bepr/pi_zero
+server = wss://server.example/bepr/client/pi_zero
 private_key_path = /etc/bepr/keys/pi_zero.pub
 shell = /bin/sh
 ```
 
-The `server` value is the public WebSocket URL reachable from the client. If the server has keys in $name.pub format in the key dir, url will be available under `domain:port/bepr/$name` path.
+The `server` value is the public WebSocket URL reachable from the client. If the server has keys in $name.pub format in the key dir, url will be available under `domain/bepr/client/$name`. The legacy path `domain/bepr/$name` is also accepted for backwards compatibility with older clients.
 
 Now you are able to start the service, the installation do not start it due to the setup mentioned previously:
 

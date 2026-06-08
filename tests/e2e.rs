@@ -428,7 +428,7 @@ fn write_client_config(port: u16, private_key_path: &PathBuf) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "server = wss://127.0.0.1:{port}/bepr/default\nprivate_key_path = {}\nshell = /bin/sh\n",
+            "server = wss://127.0.0.1:{port}/bepr/client/default\nprivate_key_path = {}\nshell = /bin/sh\n",
             private_key_path.display()
         ),
     )

@@ -1,5 +1,10 @@
 # Changelog
 
+### v0.3.3
+- ⚙️  Add canonical client endpoint `/bepr/client/<client_id>`; legacy `/bepr/<client_id>` remains accepted for backwards compatibility
+- 🔒 Reject reserved or ambiguous client IDs (`client`, `user`, paths containing `/`)
+- 🛠️  Consolidate `read_line` and `read_ssh_string` into `util`
+
 ### v0.3.2
 - 🔒 Restrict operator socket to owner-only permissions (0600) after bind
 - 🔒 Add 30-second timeout on client authentication to prevent connection stalling
