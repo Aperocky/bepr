@@ -1,5 +1,10 @@
 # Changelog
 
+### v0.3.2
+- 🔒 Restrict operator socket to owner-only permissions (0600) after bind
+- 🔒 Add 30-second timeout on client authentication to prevent connection stalling
+- 📝 Document persistent shell behavior and `stty sane` recovery
+
 ### v0.3.1
 - ⚙️  Default server bind changed to `0.0.0.0:443` — `wss://` URLs no longer need a port
 

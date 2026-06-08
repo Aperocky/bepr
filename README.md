@@ -96,6 +96,14 @@ bepr connect laptop
 
 Once attached, the `bepr connect` terminal stdin/stdout is piped to the selected client shell. Client shells run inside a PTY, while the server remains a raw byte router. Multiple clients may be connected to the server at the same time, but a single client can only have one operator attached at a time.
 
+Note: the client spawns a shell immediately on connecting to the server, not when an operator attaches. The shell runs persistently in the background. If you attach and find the terminal in a bad state, run:
+
+```sh
+stty sane
+```
+
+If the shell itself is unresponsive or broken, kill it by PID on the client machine — the client will automatically reconnect and spawn a fresh shell within 10 seconds.
+
 To operate from another machine, forward the server's local operator socket with
 
 ```sh

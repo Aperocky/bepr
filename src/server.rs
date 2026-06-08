@@ -3,6 +3,7 @@ use std::{
     env,
     fs,
     net::SocketAddr,
+    os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
@@ -17,7 +18,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, UnixListener, UnixStream},
     sync::{mpsc, oneshot, Mutex},
-    time::interval,
+    time::{interval, timeout},
 };
 use tokio_rustls::TlsAcceptor;
 
@@ -63,6 +64,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     let tcp = TcpListener::bind(&config.bind).await.map_err(|err| err.to_string())?;
     prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
     let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
+    restrict_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
 
     log(format!("listening on wss://{}/bepr/<client_id>", config.bind));
     log(format!("operator socket {}", DEFAULT_OPERATOR_SOCKET));
@@ -160,7 +162,9 @@ where
         .get(&client_id)
         .copied()
         .ok_or("missing client key after handshake")?;
-    let ws = authenticate(ws, public_key).await?;
+    let ws = timeout(Duration::from_secs(30), authenticate(ws, public_key))
+        .await
+        .map_err(|_| "authentication timed out")??;
     log(format!("{addr}: authenticated {client_id}"));
 
     let (mut ws_tx, mut ws_rx) = ws.split();
@@ -466,10 +470,12 @@ fn prepare_operator_socket(path: &str) -> std::io::Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         fs::create_dir_all(parent)?;
     }
-    if Path::new(path).exists() {
-        fs::remove_file(path)?;
-    }
+    let _ = fs::remove_file(path);
     Ok(())
+}
+
+fn restrict_operator_socket(path: &str) -> std::io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 fn load_key_dir(dir: &str) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error>> {
