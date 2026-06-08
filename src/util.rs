@@ -1,5 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tokio::{io::AsyncReadExt, net::UnixStream};
+
 pub fn log(msg: impl std::fmt::Display) {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -39,4 +41,39 @@ fn format_utc(secs: u64) -> String {
 
 fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+pub async fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        let n = stream.read(&mut byte).await?;
+        if n == 0 || byte[0] == b'\n' {
+            break;
+        }
+        bytes.push(byte[0]);
+        if bytes.len() > 4096 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "line too long",
+            ));
+        }
+    }
+    String::from_utf8(bytes)
+        .map(|line| line.trim().to_string())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "line is not utf-8"))
+}
+
+pub fn read_ssh_string(
+    input: &[u8],
+) -> Result<(&[u8], &[u8]), Box<dyn std::error::Error + Send + Sync>> {
+    if input.len() < 4 {
+        return Err("short ssh string length".into());
+    }
+    let len = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
+    let end = 4 + len;
+    if input.len() < end {
+        return Err("short ssh string body".into());
+    }
+    Ok((&input[4..end], &input[end..]))
 }

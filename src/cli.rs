@@ -9,6 +9,7 @@ use tokio::{
 use crate::{
     client,
     server::{self, DEFAULT_OPERATOR_SOCKET},
+    util::read_line,
 };
 
 pub async fn run() -> Result<(), String> {
@@ -146,26 +147,6 @@ fn parse_list_args(args: Vec<String>) -> Result<ListArgs, String> {
     }
 }
 
-async fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
-    let mut bytes = Vec::new();
-    let mut byte = [0_u8; 1];
-    loop {
-        let n = stream.read(&mut byte).await?;
-        if n == 0 || byte[0] == b'\n' {
-            break;
-        }
-        bytes.push(byte[0]);
-        if bytes.len() > 4096 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "line too long",
-            ));
-        }
-    }
-    String::from_utf8(bytes)
-        .map(|line| line.trim().to_string())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "line is not utf-8"))
-}
 
 fn lf_to_cr(bytes: &[u8]) -> Vec<u8> {
     bytes

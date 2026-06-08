@@ -22,7 +22,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-use crate::util::log;
+use crate::util::{log, read_line, read_ssh_string};
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::{
@@ -397,7 +397,7 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    fn from_args(args: Vec<String>) -> Result<Self, Box<dyn std::error::Error>> {
+    fn from_args(args: Vec<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         match args.as_slice() {
             [] => Self::from_file(DEFAULT_SERVER_CONFIG),
             [flag, path] if flag == "--config" || flag == "-c" => Self::from_file(path),
@@ -405,11 +405,11 @@ impl ServerConfig {
         }
     }
 
-    pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Self::parse(&fs::read_to_string(path)?)
     }
 
-    fn parse(input: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn parse(input: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut bind = None;
         let mut key_dir = None;
         let mut tls_cert = None;
@@ -445,12 +445,12 @@ impl ServerConfig {
         })
     }
 
-    fn load_public_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error>> {
+    fn load_public_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
         load_key_dir(&self.key_dir)
     }
 }
 
-fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Box<dyn std::error::Error + Send + Sync>> {
     let cert_pem = fs::read(cert_path)?;
     let key_pem = fs::read(key_path)?;
 
@@ -478,7 +478,7 @@ fn restrict_operator_socket(path: &str) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
-fn load_key_dir(dir: &str) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error>> {
+fn load_key_dir(dir: &str) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
     let mut keys = HashMap::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -496,13 +496,13 @@ fn load_key_dir(dir: &str) -> Result<HashMap<String, VerifyingKey>, Box<dyn std:
     Ok(keys)
 }
 
-fn load_public_key(path: &str) -> Result<VerifyingKey, Box<dyn std::error::Error>> {
+fn load_public_key(path: &str) -> Result<VerifyingKey, Box<dyn std::error::Error + Send + Sync>> {
     parse_openssh_ed25519_public_key(&fs::read_to_string(path)?)
 }
 
 fn parse_openssh_ed25519_public_key(
     input: &str,
-) -> Result<VerifyingKey, Box<dyn std::error::Error>> {
+) -> Result<VerifyingKey, Box<dyn std::error::Error + Send + Sync>> {
     let mut fields = input.split_whitespace();
     let kind = fields.next().ok_or("missing public key kind")?;
     if kind != "ssh-ed25519" {
@@ -558,38 +558,6 @@ fn error_response(status: StatusCode, body: &str) -> ErrorResponse {
         .expect("static error response is valid")
 }
 
-async fn read_line(stream: &mut UnixStream) -> std::io::Result<String> {
-    let mut bytes = Vec::new();
-    let mut byte = [0_u8; 1];
-    loop {
-        let n = stream.read(&mut byte).await?;
-        if n == 0 || byte[0] == b'\n' {
-            break;
-        }
-        bytes.push(byte[0]);
-        if bytes.len() > 4096 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "line too long",
-            ));
-        }
-    }
-    String::from_utf8(bytes)
-        .map(|line| line.trim().to_string())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "line is not utf-8"))
-}
-
-fn read_ssh_string(input: &[u8]) -> Result<(&[u8], &[u8]), Box<dyn std::error::Error>> {
-    if input.len() < 4 {
-        return Err("short ssh string length".into());
-    }
-    let len = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
-    let end = 4 + len;
-    if input.len() < end {
-        return Err("short ssh string body".into());
-    }
-    Ok((&input[4..end], &input[end..]))
-}
 
 #[cfg(test)]
 mod tests {

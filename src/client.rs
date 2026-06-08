@@ -17,7 +17,7 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, connect_async_tls_with_config, tungstenite::Message};
 
-use crate::util::log;
+use crate::util::{log, read_ssh_string};
 
 #[derive(Debug)]
 struct SkipServerVerification;
@@ -326,19 +326,6 @@ fn parse_ed25519_private_blob(
     Ok(SigningKey::from_bytes(&seed))
 }
 
-fn read_ssh_string(
-    input: &[u8],
-) -> Result<(&[u8], &[u8]), Box<dyn std::error::Error + Send + Sync>> {
-    if input.len() < 4 {
-        return Err("short ssh string length".into());
-    }
-    let len = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
-    let end = 4 + len;
-    if input.len() < end {
-        return Err("short ssh string body".into());
-    }
-    Ok((&input[4..end], &input[end..]))
-}
 
 fn signing_key_from_hex(s: &str) -> Result<SigningKey, Box<dyn std::error::Error + Send + Sync>> {
     let bytes: [u8; 32] = decode_hex(s)?
