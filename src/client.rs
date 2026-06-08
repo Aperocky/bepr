@@ -1,13 +1,70 @@
-use std::{fs, time::Duration};
+use std::{env, fs, sync::Arc, time::Duration};
 
 use base64ct::{Base64, Encoding};
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use rustls::{
+    ClientConfig as RustlsClientConfig,
+    DigitallySignedStruct,
+    Error as RustlsError,
+    SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, ServerName, UnixTime},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::sleep,
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async, connect_async_tls_with_config, tungstenite::Message};
+
+#[derive(Debug)]
+struct SkipServerVerification;
+
+impl ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ECDSA_NISTP521_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
 
 const DEFAULT_CLIENT_CONFIG: &str = "/etc/bepr/client.conf";
 
@@ -28,7 +85,21 @@ async fn run_once(
     key: &SigningKey,
     shell: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (mut ws, _) = connect_async(server).await?;
+    let (mut ws, _) = if env::var("BEPR_INSECURE_SKIP_TLS_VERIFY").is_ok() {
+        let config = RustlsClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+            .with_no_client_auth();
+        connect_async_tls_with_config(
+            server,
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+        )
+        .await?
+    } else {
+        connect_async(server).await?
+    };
 
     let Some(challenge) = ws.next().await else {
         return Err("server disconnected before challenge".into());
@@ -98,16 +169,26 @@ impl ClientConfig {
         match args.as_slice() {
             [] => Self::from_file(DEFAULT_CLIENT_CONFIG),
             [flag, path] if flag == "--config" || flag == "-c" => Self::from_file(path),
-            [server, private_key] => Ok(Self {
-                server: server.clone(),
-                private_key: PrivateKeyConfig::Hex(private_key.clone()),
-                shell: default_shell(),
-            }),
-            [server, private_key, shell] => Ok(Self {
-                server: server.clone(),
-                private_key: PrivateKeyConfig::Hex(private_key.clone()),
-                shell: shell.clone(),
-            }),
+            [server, private_key] => {
+                if !server.starts_with("wss://") {
+                    return Err("server URL must use wss:// (plaintext ws:// is not allowed)".into());
+                }
+                Ok(Self {
+                    server: server.clone(),
+                    private_key: PrivateKeyConfig::Hex(private_key.clone()),
+                    shell: default_shell(),
+                })
+            }
+            [server, private_key, shell] => {
+                if !server.starts_with("wss://") {
+                    return Err("server URL must use wss:// (plaintext ws:// is not allowed)".into());
+                }
+                Ok(Self {
+                    server: server.clone(),
+                    private_key: PrivateKeyConfig::Hex(private_key.clone()),
+                    shell: shell.clone(),
+                })
+            }
             _ => Err("invalid client arguments".into()),
         }
     }
@@ -149,8 +230,12 @@ impl ClientConfig {
             }
         }
 
+        let server = server.ok_or("config missing server")?;
+        if !server.starts_with("wss://") {
+            return Err("server URL must use wss:// (plaintext ws:// is not allowed)".into());
+        }
         Ok(Self {
-            server: server.ok_or("config missing server")?,
+            server,
             private_key: PrivateKeyConfig::Path(
                 private_key_path.ok_or("config missing private_key_path")?,
             ),
@@ -299,14 +384,14 @@ mod tests {
     fn client_config_parse_reads_required_fields_and_shell() {
         let config = ClientConfig::parse(
             "
-            server = ws://127.0.0.1:8080/bepr/default
+            server = wss://127.0.0.1:8080/bepr/default
             private_key_path = /home/me/.ssh/id_ed25519
             shell = /bin/sh
             ",
         )
         .unwrap();
 
-        assert_eq!(config.server, "ws://127.0.0.1:8080/bepr/default");
+        assert_eq!(config.server, "wss://127.0.0.1:8080/bepr/default");
         assert_eq!(
             config.private_key,
             PrivateKeyConfig::Path("/home/me/.ssh/id_ed25519".to_string())
@@ -318,7 +403,7 @@ mod tests {
     fn client_config_parse_defaults_shell() {
         let config = ClientConfig::parse(
             "
-            server = ws://127.0.0.1:8080/bepr/default
+            server = wss://127.0.0.1:8080/bepr/default
             private_key_path = /home/me/.ssh/id_ed25519
             ",
         )
@@ -331,7 +416,7 @@ mod tests {
     fn client_config_parse_rejects_unknown_key() {
         assert!(ClientConfig::parse(
             "
-            server = ws://127.0.0.1:8080/bepr/default
+            server = wss://127.0.0.1:8080/bepr/default
             private_key_path = /home/me/.ssh/id_ed25519
             typo = nope
             ",
@@ -340,14 +425,25 @@ mod tests {
     }
 
     #[test]
+    fn client_config_parse_rejects_plaintext_ws_url() {
+        assert!(ClientConfig::parse(
+            "
+            server = ws://127.0.0.1:8080/bepr/default
+            private_key_path = /home/me/.ssh/id_ed25519
+            ",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn client_config_from_args_accepts_positional_hex_key() {
         let config = ClientConfig::from_args(vec![
-            "ws://127.0.0.1:8080/bepr/default".to_string(),
+            "wss://127.0.0.1:8080/bepr/default".to_string(),
             "00".repeat(32),
         ])
         .unwrap();
 
-        assert_eq!(config.server, "ws://127.0.0.1:8080/bepr/default");
+        assert_eq!(config.server, "wss://127.0.0.1:8080/bepr/default");
         assert_eq!(config.private_key, PrivateKeyConfig::Hex("00".repeat(32)));
         assert_eq!(config.shell, "/bin/sh");
     }

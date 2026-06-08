@@ -24,7 +24,10 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let key_dir = temp_dir("bepr-integ-keys");
     fs::create_dir(&key_dir).expect("create key dir");
     fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
-    let server_config_path = write_server_config(port, &key_dir);
+    let tls_cert_path = temp_file("bepr-integ-tls-cert");
+    let tls_key_path = temp_file("bepr-integ-tls-key");
+    generate_self_signed_cert(&tls_cert_path, &tls_key_path);
+    let server_config_path = write_server_config(port, &key_dir, &tls_cert_path, &tls_key_path);
     let client_config_path = write_client_config(port, &private_key_path);
     let bepr_bin = bin_path("bepr");
 
@@ -46,6 +49,7 @@ fn authenticated_client_pipes_shell_output_to_server() {
         .arg("client")
         .arg("--config")
         .arg(&client_config_path)
+        .env("BEPR_INSECURE_SKIP_TLS_VERIFY", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -99,6 +103,8 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let _ = fs::remove_file(client_config_path);
     let _ = fs::remove_file(private_key_path);
     let _ = fs::remove_file(public_key_path);
+    let _ = fs::remove_file(tls_cert_path);
+    let _ = fs::remove_file(tls_key_path);
     let _ = fs::remove_dir_all(key_dir);
 }
 
@@ -115,7 +121,10 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
     let key_dir = temp_dir("bepr-heartbeat-keys");
     fs::create_dir(&key_dir).expect("create key dir");
     fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
-    let server_config_path = write_server_config(port, &key_dir);
+    let tls_cert_path = temp_file("bepr-heartbeat-tls-cert");
+    let tls_key_path = temp_file("bepr-heartbeat-tls-key");
+    generate_self_signed_cert(&tls_cert_path, &tls_key_path);
+    let server_config_path = write_server_config(port, &key_dir, &tls_cert_path, &tls_key_path);
     let client_config_path = write_client_config(port, &private_key_path);
     let bepr_bin = bin_path("bepr");
 
@@ -137,6 +146,7 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
         .arg("client")
         .arg("--config")
         .arg(&client_config_path)
+        .env("BEPR_INSECURE_SKIP_TLS_VERIFY", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -178,6 +188,7 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
         .arg("client")
         .arg("--config")
         .arg(&client_config_path)
+        .env("BEPR_INSECURE_SKIP_TLS_VERIFY", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -205,6 +216,8 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
     let _ = fs::remove_file(client_config_path);
     let _ = fs::remove_file(private_key_path);
     let _ = fs::remove_file(public_key_path);
+    let _ = fs::remove_file(tls_cert_path);
+    let _ = fs::remove_file(tls_key_path);
     let _ = fs::remove_dir_all(key_dir);
 }
 
@@ -226,7 +239,10 @@ fn terminal_connect_pipes_tty_input_and_exits() {
     let key_dir = temp_dir("bepr-tty-keys");
     fs::create_dir(&key_dir).expect("create key dir");
     fs::copy(&public_key_path, key_dir.join("default.pub")).expect("copy public key");
-    let server_config_path = write_server_config(port, &key_dir);
+    let tls_cert_path = temp_file("bepr-tty-tls-cert");
+    let tls_key_path = temp_file("bepr-tty-tls-key");
+    generate_self_signed_cert(&tls_cert_path, &tls_key_path);
+    let server_config_path = write_server_config(port, &key_dir, &tls_cert_path, &tls_key_path);
     let client_config_path = write_client_config(port, &private_key_path);
     let bepr_bin = bin_path("bepr");
 
@@ -248,6 +264,7 @@ fn terminal_connect_pipes_tty_input_and_exits() {
         .arg("client")
         .arg("--config")
         .arg(&client_config_path)
+        .env("BEPR_INSECURE_SKIP_TLS_VERIFY", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -281,6 +298,8 @@ fn terminal_connect_pipes_tty_input_and_exits() {
     let _ = fs::remove_file(client_config_path);
     let _ = fs::remove_file(private_key_path);
     let _ = fs::remove_file(public_key_path);
+    let _ = fs::remove_file(tls_cert_path);
+    let _ = fs::remove_file(tls_key_path);
     let _ = fs::remove_dir_all(key_dir);
 }
 
@@ -372,11 +391,33 @@ fn generate_ed25519_key(path: &PathBuf) {
     assert!(status.success(), "ssh-keygen failed");
 }
 
-fn write_server_config(port: u16, key_dir: &PathBuf) -> PathBuf {
+fn generate_self_signed_cert(cert_path: &PathBuf, key_path: &PathBuf) {
+    let status = Command::new("openssl")
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", key_path.to_str().unwrap(),
+            "-out", cert_path.to_str().unwrap(),
+            "-days", "1",
+            "-nodes",
+            "-subj", "/CN=localhost",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run openssl req");
+    assert!(status.success(), "openssl req failed");
+}
+
+fn write_server_config(port: u16, key_dir: &PathBuf, tls_cert: &PathBuf, tls_key: &PathBuf) -> PathBuf {
     let path = temp_file("bepr-integ-server-conf");
     fs::write(
         &path,
-        format!("bind = 127.0.0.1:{port}\nkey_dir = {}\n", key_dir.display()),
+        format!(
+            "bind = 127.0.0.1:{port}\nkey_dir = {}\ntls_cert = {}\ntls_key = {}\n",
+            key_dir.display(),
+            tls_cert.display(),
+            tls_key.display(),
+        ),
     )
     .expect("write server config");
     path
@@ -387,7 +428,7 @@ fn write_client_config(port: u16, private_key_path: &PathBuf) -> PathBuf {
     fs::write(
         &path,
         format!(
-            "server = ws://127.0.0.1:{port}/bepr/default\nprivate_key_path = {}\nshell = /bin/sh\n",
+            "server = wss://127.0.0.1:{port}/bepr/default\nprivate_key_path = {}\nshell = /bin/sh\n",
             private_key_path.display()
         ),
     )

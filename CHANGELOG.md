@@ -1,5 +1,11 @@
 # Changelog
 
+### v0.3.0
+- 🔒 Add TLS 1.3 support — all client-server traffic is now encrypted over `wss://`
+- 🔒 Enforce `wss://` in client config; `ws://` is not permitted except in end-to-end tests via `BEPR_INSECURE_SKIP_TLS_VERIFY`
+- ⚙️  Add `tls_cert` and `tls_key` fields to server config
+- ⚙️  TLS certificate reloaded every 5 minutes alongside public keys (picks up renewals without restart)
+
 ### v0.2.1
 - ✨ Buffer pending client output so the initial shell prompt is visible on attach
 - 🐛 Translate non-TTY piped input newlines for PTY shell input
