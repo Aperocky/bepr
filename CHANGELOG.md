@@ -1,5 +1,12 @@
 # Changelog
 
+### v0.4.0
+- ✨ Add operator user bridge support on the server
+- ✨ Add client-side user bridge handling and operator CLI support
+- ⚙️  Add `user.conf` and centralize config parsing in `config`
+- 📦 Include `user.conf.example` in deb, rpm, and macOS packages, and keep packaged example configs updated on upgrade
+- 📦 Allow update scripts to install a specific version argument, such as `v0.4.0`
+
 ### v0.3.3
 - ⚙️  Add canonical client endpoint `/bepr/client/<client_id>`; legacy `/bepr/<client_id>` remains accepted for backwards compatibility
 - 🔒 Reject reserved or ambiguous client IDs (`client`, `user`, paths containing `/`)
