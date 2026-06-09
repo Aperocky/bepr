@@ -19,6 +19,10 @@ use crate::{
 pub async fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("--version") | Some("-V") => {
+            println!("{}", version());
+            Ok(())
+        }
         Some("server")  => server::run(args[1..].to_vec()).await,
         Some("client")  => client::run(args[1..].to_vec()).await,
         Some("connect") => connect(args[1..].to_vec()).await,
@@ -29,6 +33,10 @@ pub async fn run() -> Result<(), String> {
 
 fn usage() -> String {
     "usage: bepr server [--config server.conf]\n       bepr client [--config client.conf]\n       bepr connect [--socket path|wss://url] [--key key_path] <client_id>\n       bepr list [--socket path|wss://url] [--key key_path]".to_string()
+}
+
+fn version() -> String {
+    format!("bepr {}", env!("CARGO_PKG_VERSION"))
 }
 
 async fn connect(args: Vec<String>) -> Result<(), String> {
@@ -270,6 +278,11 @@ impl Drop for RawTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_reports_package_version() {
+        assert_eq!(version(), format!("bepr {}", env!("CARGO_PKG_VERSION")));
+    }
 
     #[test]
     fn parse_connect_args_accepts_client_id() {

@@ -1,5 +1,9 @@
 # Changelog
 
+### v0.4.1
+- 🛠️  Add `bepr --version` / `bepr -V` so update scripts can detect the installed version
+- 🛡️  Add pre-auth handshake timeout and stop logging rejected WebSocket upgrade noise
+
 ### v0.4.0
 - ✨ Add operator user bridge support on the server
 - ✨ Add client-side user bridge handling and operator CLI support
