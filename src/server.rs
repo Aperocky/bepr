@@ -57,10 +57,10 @@ struct Session {
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let config = ServerConfig::from_args(args).map_err(|err| err.to_string())?;
     let keys = Arc::new(StdMutex::new(
-        config.load_public_keys().map_err(|err| err.to_string())?,
+        config.load_public_keys().unwrap_or_else(|err| { log(format!("key_dir: {err}")); Default::default() }),
     ));
     let user_keys = Arc::new(StdMutex::new(
-        config.load_user_keys().map_err(|err| err.to_string())?,
+        config.load_user_keys().unwrap_or_else(|err| { log(format!("user_key_dir: {err}")); Default::default() }),
     ));
     let tls_acceptor = Arc::new(StdMutex::new(
         load_tls_acceptor(&config.tls_cert, &config.tls_key).map_err(|err| err.to_string())?,

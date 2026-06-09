@@ -21,6 +21,7 @@ rm -rf "$WORK"
 mkdir -p \
     "$WORK/usr/local/bin" \
     "$WORK/etc/bepr/keys" \
+    "$WORK/etc/bepr/user-keys" \
     "$WORK/var/log/bepr" \
     "$WORK/Library/LaunchDaemons" \
     "$OUT"
@@ -28,6 +29,7 @@ mkdir -p \
 install -m 0755 "$BIN" "$WORK/usr/local/bin/bepr"
 install -m 0644 "$ROOT/packaging/examples/server.conf" "$WORK/etc/bepr/server.conf.example"
 install -m 0644 "$ROOT/packaging/examples/client.conf" "$WORK/etc/bepr/client.conf.example"
+install -m 0644 "$ROOT/packaging/examples/user.conf" "$WORK/etc/bepr/user.conf.example"
 install -m 0644 "$ROOT/packaging/launchd/com.bepr.plist" "$WORK/Library/LaunchDaemons/com.bepr.plist"
 
 pkgbuild \

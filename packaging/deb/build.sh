@@ -18,6 +18,7 @@ mkdir -p \
     "$WORK/DEBIAN" \
     "$WORK/usr/bin" \
     "$WORK/etc/bepr/keys" \
+    "$WORK/etc/bepr/user-keys" \
     "$WORK/var/log/bepr" \
     "$WORK/lib/systemd/system" \
     "$OUT"
@@ -25,6 +26,7 @@ mkdir -p \
 install -m 0755 "$BIN" "$WORK/usr/bin/bepr"
 install -m 0644 "$ROOT/packaging/examples/server.conf" "$WORK/etc/bepr/server.conf.example"
 install -m 0644 "$ROOT/packaging/examples/client.conf" "$WORK/etc/bepr/client.conf.example"
+install -m 0644 "$ROOT/packaging/examples/user.conf" "$WORK/etc/bepr/user.conf.example"
 install -m 0644 "$ROOT/packaging/systemd/bepr.service" "$WORK/lib/systemd/system/bepr.service"
 
 cat > "$WORK/DEBIAN/control" <<EOF
@@ -35,11 +37,6 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: bepr maintainers
 Description: Small authenticated reverse shell pipe
-EOF
-
-cat > "$WORK/DEBIAN/conffiles" <<EOF
-/etc/bepr/server.conf.example
-/etc/bepr/client.conf.example
 EOF
 
 cat > "$WORK/DEBIAN/postinst" <<'EOF'

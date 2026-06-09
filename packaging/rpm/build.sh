@@ -17,6 +17,7 @@ rm -rf "$WORK"
 mkdir -p \
     "$WORK/usr/bin" \
     "$WORK/etc/bepr/keys" \
+    "$WORK/etc/bepr/user-keys" \
     "$WORK/var/log/bepr" \
     "$WORK/usr/lib/systemd/system" \
     "$OUT"
@@ -24,6 +25,7 @@ mkdir -p \
 install -m 0755 "$BIN" "$WORK/usr/bin/bepr"
 install -m 0644 "$ROOT/packaging/examples/server.conf" "$WORK/etc/bepr/server.conf.example"
 install -m 0644 "$ROOT/packaging/examples/client.conf" "$WORK/etc/bepr/client.conf.example"
+install -m 0644 "$ROOT/packaging/examples/user.conf" "$WORK/etc/bepr/user.conf.example"
 install -m 0644 "$ROOT/packaging/systemd/bepr.service" "$WORK/usr/lib/systemd/system/bepr.service"
 
 cat > "$SPEC" <<EOF
@@ -50,9 +52,11 @@ fi
 /usr/bin/bepr
 %dir /etc/bepr
 %dir /etc/bepr/keys
+%dir /etc/bepr/user-keys
 %dir /var/log/bepr
-%config(noreplace) /etc/bepr/server.conf.example
-%config(noreplace) /etc/bepr/client.conf.example
+/etc/bepr/server.conf.example
+/etc/bepr/client.conf.example
+/etc/bepr/user.conf.example
 /usr/lib/systemd/system/bepr.service
 EOF
 
