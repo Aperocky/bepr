@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     client,
+    config::{load_openssh_ed25519_private_key, UserConfig},
     server::{self, DEFAULT_OPERATOR_SOCKET},
     util::read_line,
 };
@@ -31,11 +32,18 @@ fn usage() -> String {
 }
 
 async fn connect(args: Vec<String>) -> Result<(), String> {
-    let args = parse_connect_args(args)?;
-    if args.socket.starts_with("wss://") {
+    let mut args = parse_connect_args(args)?;
+    if args.socket.is_none() || args.key_path.is_none() {
+        if let Ok(Some(user_cfg)) = UserConfig::load_default() {
+            args.socket.get_or_insert(user_cfg.server);
+            args.key_path.get_or_insert(user_cfg.private_key_path);
+        }
+    }
+    let socket = args.socket.unwrap_or_else(|| DEFAULT_OPERATOR_SOCKET.to_string());
+    if socket.starts_with("wss://") {
         let key_path = args.key_path.as_deref().ok_or("--key required for wss:// socket")?;
-        let key = client::load_openssh_ed25519_private_key(key_path).map_err(|e| e.to_string())?;
-        let ws = client::connect_authenticated(&args.socket, &key).await.map_err(|e| e.to_string())?;
+        let key = load_openssh_ed25519_private_key(key_path).map_err(|e| e.to_string())?;
+        let ws = client::connect_authenticated(&socket, &key).await.map_err(|e| e.to_string())?;
         let (mut ws_tx, mut ws_rx) = ws.split();
 
         ws_tx.send(Message::Binary(format!("CONNECT {}", args.client_id).into_bytes()))
@@ -95,7 +103,7 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
         }
         raw_terminal.restore().map_err(|e| format!("restore terminal: {e}"))?;
     } else {
-        let mut stream = UnixStream::connect(&args.socket).await.map_err(|e| e.to_string())?;
+        let mut stream = UnixStream::connect(&socket).await.map_err(|e| e.to_string())?;
         stream.write_all(format!("CONNECT {}\n", args.client_id).as_bytes())
             .await.map_err(|e| e.to_string())?;
 
@@ -134,11 +142,18 @@ async fn connect(args: Vec<String>) -> Result<(), String> {
 }
 
 async fn list(args: Vec<String>) -> Result<(), String> {
-    let args = parse_list_args(args)?;
-    if args.socket.starts_with("wss://") {
+    let mut args = parse_list_args(args)?;
+    if args.socket.is_none() || args.key_path.is_none() {
+        if let Ok(Some(user_cfg)) = UserConfig::load_default() {
+            args.socket.get_or_insert(user_cfg.server);
+            args.key_path.get_or_insert(user_cfg.private_key_path);
+        }
+    }
+    let socket = args.socket.unwrap_or_else(|| DEFAULT_OPERATOR_SOCKET.to_string());
+    if socket.starts_with("wss://") {
         let key_path = args.key_path.as_deref().ok_or("--key required for wss:// socket")?;
-        let key = client::load_openssh_ed25519_private_key(key_path).map_err(|e| e.to_string())?;
-        let mut ws = client::connect_authenticated(&args.socket, &key).await.map_err(|e| e.to_string())?;
+        let key = load_openssh_ed25519_private_key(key_path).map_err(|e| e.to_string())?;
+        let mut ws = client::connect_authenticated(&socket, &key).await.map_err(|e| e.to_string())?;
 
         ws.send(Message::Binary(b"LIST".to_vec())).await.map_err(|e| e.to_string())?;
 
@@ -152,7 +167,7 @@ async fn list(args: Vec<String>) -> Result<(), String> {
         stdout.write_all(body).await.map_err(|e| e.to_string())?;
         stdout.flush().await.map_err(|e| e.to_string())?;
     } else {
-        let mut stream = UnixStream::connect(&args.socket).await.map_err(|e| e.to_string())?;
+        let mut stream = UnixStream::connect(&socket).await.map_err(|e| e.to_string())?;
         stream.write_all(b"LIST\n").await.map_err(|e| e.to_string())?;
 
         let response = read_line(&mut stream).await.map_err(|e| e.to_string())?;
@@ -173,26 +188,26 @@ async fn list(args: Vec<String>) -> Result<(), String> {
 #[derive(Debug, PartialEq, Eq)]
 struct ConnectArgs {
     client_id: String,
-    socket: String,
+    socket: Option<String>,
     key_path: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ListArgs {
-    socket: String,
+    socket: Option<String>,
     key_path: Option<String>,
 }
 
 fn parse_connect_args(args: Vec<String>) -> Result<ConnectArgs, String> {
     let usage = "usage: bepr connect [--socket path|wss://url] [--key key_path] <client_id>";
-    let mut socket = DEFAULT_OPERATOR_SOCKET.to_string();
+    let mut socket = None;
     let mut key_path = None;
     let mut client_id = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" => { i += 1; socket    = args.get(i).ok_or(usage)?.clone(); }
-            "--key"    => { i += 1; key_path  = Some(args.get(i).ok_or(usage)?.clone()); }
+            "--socket" => { i += 1; socket   = Some(args.get(i).ok_or(usage)?.clone()); }
+            "--key"    => { i += 1; key_path = Some(args.get(i).ok_or(usage)?.clone()); }
             arg if !arg.starts_with('-') => { client_id = Some(arg.to_string()); }
             arg => return Err(format!("unknown flag {arg}")),
         }
@@ -203,12 +218,12 @@ fn parse_connect_args(args: Vec<String>) -> Result<ConnectArgs, String> {
 
 fn parse_list_args(args: Vec<String>) -> Result<ListArgs, String> {
     let usage = "usage: bepr list [--socket path|wss://url] [--key key_path]";
-    let mut socket = DEFAULT_OPERATOR_SOCKET.to_string();
+    let mut socket = None;
     let mut key_path = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" => { i += 1; socket   = args.get(i).ok_or(usage)?.clone(); }
+            "--socket" => { i += 1; socket   = Some(args.get(i).ok_or(usage)?.clone()); }
             "--key"    => { i += 1; key_path = Some(args.get(i).ok_or(usage)?.clone()); }
             arg => return Err(format!("unknown flag {arg}")),
         }
@@ -260,7 +275,7 @@ mod tests {
     fn parse_connect_args_accepts_client_id() {
         let args = parse_connect_args(vec!["laptop".to_string()]).unwrap();
         assert_eq!(args.client_id, "laptop");
-        assert_eq!(args.socket, DEFAULT_OPERATOR_SOCKET);
+        assert_eq!(args.socket, None);
         assert_eq!(args.key_path, None);
     }
 
@@ -270,7 +285,7 @@ mod tests {
             "--socket".to_string(), "/tmp/bepr.sock".to_string(), "laptop".to_string(),
         ]).unwrap();
         assert_eq!(args.client_id, "laptop");
-        assert_eq!(args.socket, "/tmp/bepr.sock");
+        assert_eq!(args.socket.as_deref(), Some("/tmp/bepr.sock"));
     }
 
     #[test]
@@ -280,7 +295,7 @@ mod tests {
             "--key".to_string(), "/etc/bepr/keys/me".to_string(),
             "pi".to_string(),
         ]).unwrap();
-        assert_eq!(args.socket, "wss://host/bepr/user/me");
+        assert_eq!(args.socket.as_deref(), Some("wss://host/bepr/user/me"));
         assert_eq!(args.key_path.as_deref(), Some("/etc/bepr/keys/me"));
         assert_eq!(args.client_id, "pi");
     }
@@ -293,7 +308,7 @@ mod tests {
     #[test]
     fn parse_list_args_accepts_no_args() {
         let args = parse_list_args(vec![]).unwrap();
-        assert_eq!(args.socket, DEFAULT_OPERATOR_SOCKET);
+        assert_eq!(args.socket, None);
         assert_eq!(args.key_path, None);
     }
 
@@ -303,7 +318,7 @@ mod tests {
             "--socket".to_string(), "wss://host/bepr/user/me".to_string(),
             "--key".to_string(), "/etc/bepr/keys/me".to_string(),
         ]).unwrap();
-        assert_eq!(args.socket, "wss://host/bepr/user/me");
+        assert_eq!(args.socket.as_deref(), Some("wss://host/bepr/user/me"));
         assert_eq!(args.key_path.as_deref(), Some("/etc/bepr/keys/me"));
     }
 

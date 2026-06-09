@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64ct::{Base64, Encoding};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use rustls::ServerConfig as RustlsServerConfig;
@@ -22,7 +21,8 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-use crate::util::{log, read_line, read_ssh_string};
+use crate::config::{load_key_dir, ServerConfig};
+use crate::util::{log, read_line};
 use tokio_tungstenite::{
     accept_hdr_async,
     tungstenite::{
@@ -34,8 +34,6 @@ use tokio_tungstenite::{
 };
 
 pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
-pub const DEFAULT_SERVER_CONFIG: &str = "/etc/bepr/server.conf";
-pub const DEFAULT_BIND: &str = "0.0.0.0:443";
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 const KEY_RELOAD_INTERVAL_MS: u64 = 300_000;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
@@ -595,79 +593,6 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct ServerConfig {
-    pub bind: String,
-    pub key_dir: String,
-    pub user_key_dir: Option<String>,
-    pub tls_cert: String,
-    pub tls_key: String,
-}
-
-impl ServerConfig {
-    fn from_args(args: Vec<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        match args.as_slice() {
-            [] => Self::from_file(DEFAULT_SERVER_CONFIG),
-            [flag, path] if flag == "--config" || flag == "-c" => Self::from_file(path),
-            _ => Err("usage: bepr server [--config server.conf]".into()),
-        }
-    }
-
-    pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::parse(&fs::read_to_string(path)?)
-    }
-
-    fn parse(input: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let mut bind = None;
-        let mut key_dir = None;
-        let mut user_key_dir = None;
-        let mut tls_cert = None;
-        let mut tls_key = None;
-
-        for (idx, line) in input.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                return Err(format!("config:{} expected key = value", idx + 1).into());
-            };
-            let key = key.trim();
-            let value = value.trim();
-            if value.is_empty() {
-                return Err(format!("config:{} empty value for {key}", idx + 1).into());
-            }
-            match key {
-                "bind"         => bind         = Some(value.to_string()),
-                "key_dir"      => key_dir      = Some(value.to_string()),
-                "user_key_dir" => user_key_dir = Some(value.to_string()),
-                "tls_cert"     => tls_cert     = Some(value.to_string()),
-                "tls_key"      => tls_key      = Some(value.to_string()),
-                _ => return Err(format!("config:{} unknown key {key}", idx + 1).into()),
-            }
-        }
-
-        Ok(Self {
-            bind: bind.unwrap_or_else(|| DEFAULT_BIND.to_string()),
-            key_dir: key_dir.ok_or("config missing key_dir")?,
-            user_key_dir,
-            tls_cert: tls_cert.ok_or("config missing tls_cert")?,
-            tls_key: tls_key.ok_or("config missing tls_key")?,
-        })
-    }
-
-    fn load_public_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
-        load_key_dir(&self.key_dir)
-    }
-
-    fn load_user_keys(&self) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
-        match self.user_key_dir.as_deref() {
-            Some(dir) => load_key_dir(dir),
-            None => Ok(HashMap::new()),
-        }
-    }
-}
-
 fn load_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, Box<dyn std::error::Error + Send + Sync>> {
     let cert_pem = fs::read(cert_path)?;
     let key_pem = fs::read(key_path)?;
@@ -694,52 +619,6 @@ fn prepare_operator_socket(path: &str) -> std::io::Result<()> {
 
 fn restrict_operator_socket(path: &str) -> std::io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-fn load_key_dir(dir: &str) -> Result<HashMap<String, VerifyingKey>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut keys = HashMap::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("pub") {
-            continue;
-        }
-        let id = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| format!("invalid public key filename {}", path.display()))?;
-        let path = path.to_str().ok_or("public key path is not utf-8")?;
-        keys.insert(id.to_string(), load_public_key(path)?);
-    }
-    Ok(keys)
-}
-
-fn load_public_key(path: &str) -> Result<VerifyingKey, Box<dyn std::error::Error + Send + Sync>> {
-    parse_openssh_ed25519_public_key(&fs::read_to_string(path)?)
-}
-
-fn parse_openssh_ed25519_public_key(
-    input: &str,
-) -> Result<VerifyingKey, Box<dyn std::error::Error + Send + Sync>> {
-    let mut fields = input.split_whitespace();
-    let kind = fields.next().ok_or("missing public key kind")?;
-    if kind != "ssh-ed25519" {
-        return Err("public key must be ssh-ed25519".into());
-    }
-    let blob_b64 = fields.next().ok_or("missing public key body")?;
-    let blob = Base64::decode_vec(blob_b64)?;
-    let (inner_kind, rest) = read_ssh_string(&blob)?;
-    if inner_kind != b"ssh-ed25519" {
-        return Err("public key body kind mismatch".into());
-    }
-    let (key_bytes, rest) = read_ssh_string(rest)?;
-    if !rest.is_empty() {
-        return Err("public key body has trailing data".into());
-    }
-    let key_bytes: [u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| "ed25519 public key must be 32 bytes")?;
-    Ok(VerifyingKey::from_bytes(&key_bytes)?)
 }
 
 async fn authenticate<S>(
@@ -780,10 +659,8 @@ fn error_response(status: StatusCode, body: &str) -> ErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::{
-        io::AsyncReadExt,
-        net::UnixStream,
-    };
+    use crate::config::parse_openssh_ed25519_public_key;
+    use tokio::{io::AsyncReadExt, net::UnixStream};
     use std::time::{SystemTime, UNIX_EPOCH};
     use ed25519_dalek::Signer;
     use tokio_tungstenite::{accept_async, client_async};
@@ -941,101 +818,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn server_config_parse_reads_all_fields() {
-        let config = ServerConfig::parse(
-            "
-            bind = 0.0.0.0:8080
-            key_dir = /etc/bepr/keys
-            tls_cert = /etc/bepr/tls/cert.pem
-            tls_key = /etc/bepr/tls/key.pem
-            ",
-        )
-        .unwrap();
-
-        assert_eq!(config.bind, "0.0.0.0:8080");
-        assert_eq!(config.key_dir, "/etc/bepr/keys");
-        assert_eq!(config.tls_cert, "/etc/bepr/tls/cert.pem");
-        assert_eq!(config.tls_key, "/etc/bepr/tls/key.pem");
-    }
-
-    #[test]
-    fn server_config_parse_defaults_bind() {
-        let config = ServerConfig::parse(
-            "key_dir = /etc/bepr/keys\ntls_cert = /etc/bepr/tls/cert.pem\ntls_key = /etc/bepr/tls/key.pem\n"
-        ).unwrap();
-
-        assert_eq!(config.bind, DEFAULT_BIND);
-        assert_eq!(config.key_dir, "/etc/bepr/keys");
-    }
-
-    #[test]
-    fn server_config_parse_requires_key_dir() {
-        assert!(ServerConfig::parse(
-            "bind = 127.0.0.1:8080\ntls_cert = /etc/bepr/tls/cert.pem\ntls_key = /etc/bepr/tls/key.pem\n"
-        ).is_err());
-    }
-
-    #[test]
-    fn server_config_parse_requires_tls_cert() {
-        assert!(ServerConfig::parse(
-            "bind = 127.0.0.1:8080\nkey_dir = /etc/bepr/keys\ntls_key = /etc/bepr/tls/key.pem\n"
-        ).is_err());
-    }
-
-    #[test]
-    fn server_config_parse_requires_tls_key() {
-        assert!(ServerConfig::parse(
-            "bind = 127.0.0.1:8080\nkey_dir = /etc/bepr/keys\ntls_cert = /etc/bepr/tls/cert.pem\n"
-        ).is_err());
-    }
-
-    #[test]
-    fn server_config_parse_rejects_unknown_key() {
-        assert!(ServerConfig::parse(
-            "
-            bind = 127.0.0.1:8080
-            key_dir = /etc/bepr/keys
-            tls_cert = /etc/bepr/tls/cert.pem
-            tls_key = /etc/bepr/tls/key.pem
-            operator_socket = /tmp/other.sock
-            ",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn parse_public_key_reads_openssh_ed25519() {
-        let key = parse_openssh_ed25519_public_key(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPPixtDFSIPO+YfoD8qk2AQFNAfh7NuizV5cdQ0ii4CI\n",
-        )
-        .unwrap();
-        assert_eq!(key.as_bytes().len(), 32);
-    }
-
-    #[test]
-    fn parse_public_key_rejects_non_ed25519_kind() {
-        assert!(parse_openssh_ed25519_public_key("ssh-rsa AAAA").is_err());
-    }
-
-    #[test]
-    fn load_public_keys_from_key_dir() {
-        let dir = temp_dir("bepr-key-dir");
-        fs::create_dir(&dir).unwrap();
-        fs::write(
-            dir.join("laptop.pub"),
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPPixtDFSIPO+YfoD8qk2AQFNAfh7NuizV5cdQ0ii4CI\n",
-        )
-        .unwrap();
-        fs::write(dir.join("ignored.txt"), "nope").unwrap();
-
-        let keys = load_key_dir(dir.to_str().unwrap()).unwrap();
-        assert!(keys.contains_key("laptop"));
-        assert!(!keys.contains_key("ignored"));
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
     #[tokio::test]
     async fn list_sessions_uses_current_public_keys_map() {
         let keys = Arc::new(StdMutex::new(HashMap::from([(
@@ -1083,11 +865,4 @@ mod tests {
         assert!(!second.contains("laptop\tdisconnected"));
     }
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
-    }
 }

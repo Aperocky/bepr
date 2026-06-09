@@ -388,6 +388,96 @@ fn network_operator_connects_and_pipes_shell_output() {
     let _ = fs::remove_dir_all(user_key_dir);
 }
 
+#[test]
+fn network_operator_uses_user_config_when_no_flags() {
+    let _test_guard = test_lock().lock().unwrap_or_else(|err| err.into_inner());
+    build_bin();
+    let _socket_guard = TestSocketGuard::new();
+
+    let port = free_port();
+    let client_key_path = temp_file("bepr-ucfg-client-id-ed25519");
+    generate_ed25519_key(&client_key_path);
+    let client_pub_path = PathBuf::from(format!("{}.pub", client_key_path.display()));
+    let user_key_path = temp_file("bepr-ucfg-user-id-ed25519");
+    generate_ed25519_key(&user_key_path);
+    let user_pub_path = PathBuf::from(format!("{}.pub", user_key_path.display()));
+
+    let client_key_dir = temp_dir("bepr-ucfg-client-keys");
+    fs::create_dir(&client_key_dir).expect("create client key dir");
+    fs::copy(&client_pub_path, client_key_dir.join("default.pub")).expect("copy client public key");
+
+    let user_key_dir = temp_dir("bepr-ucfg-user-keys");
+    fs::create_dir(&user_key_dir).expect("create user key dir");
+    fs::copy(&user_pub_path, user_key_dir.join("operator.pub")).expect("copy user public key");
+
+    let tls_cert_path = temp_file("bepr-ucfg-tls-cert");
+    let tls_key_path = temp_file("bepr-ucfg-tls-key");
+    generate_self_signed_cert(&tls_cert_path, &tls_key_path);
+
+    let server_config_path = write_server_config_full(port, &client_key_dir, Some(&user_key_dir), &tls_cert_path, &tls_key_path);
+    let client_config_path = write_client_config(port, &client_key_path);
+
+    let fake_home = temp_dir("bepr-ucfg-home");
+    fs::create_dir(&fake_home).expect("create fake home");
+    write_user_config(port, &user_key_path, &fake_home);
+
+    let bepr_bin = bin_path("bepr");
+
+    let server = Command::new(&bepr_bin)
+        .args(["server", "--config"]).arg(&server_config_path)
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().expect("spawn bepr server");
+    let mut server = ChildGuard::new(server);
+    let server_stderr = read_lines(server.child.stderr.take().unwrap());
+    wait_for_tcp(port);
+
+    let client = Command::new(&bepr_bin)
+        .args(["client", "--config"]).arg(&client_config_path)
+        .env("BEPR_INSECURE_SKIP_TLS_VERIFY", "1")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped())
+        .spawn().expect("spawn bepr client");
+    let mut client = ChildGuard::new(client);
+    let _client_stderr = read_lines(client.child.stderr.take().unwrap());
+    assert_line_contains(&server_stderr, "authenticated default", Duration::from_secs(5));
+
+    // connect with no --socket or --key; should fall back to user.conf via fake HOME
+    let connect = Command::new(&bepr_bin)
+        .arg("connect")
+        .arg("default")
+        .env("HOME", &fake_home)
+        .env("BEPR_INSECURE_SKIP_TLS_VERIFY", "1")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().expect("spawn bepr connect (from user config)");
+    let mut connect = ChildGuard::new(connect);
+    let connect_stdout = read_lines(connect.child.stdout.take().unwrap());
+    let _connect_stderr = read_lines(connect.child.stderr.take().unwrap());
+
+    writeln!(
+        connect.child.stdin.as_mut().expect("connect stdin"),
+        "printf 'bepr-ucfg-ok\\n'"
+    ).expect("write command to connect stdin");
+    assert_line_contains(&connect_stdout, "bepr-ucfg-ok", Duration::from_secs(5));
+
+    writeln!(connect.child.stdin.as_mut().expect("connect stdin"), "exit")
+        .expect("write exit to connect stdin");
+    assert_line_contains(&server_stderr, "detached from default", Duration::from_secs(5));
+    wait_for_child_exit(&mut connect.child, Duration::from_secs(5));
+
+    client.kill();
+    server.kill();
+    let _ = fs::remove_file(server_config_path);
+    let _ = fs::remove_file(client_config_path);
+    let _ = fs::remove_file(&client_key_path);
+    let _ = fs::remove_file(&client_pub_path);
+    let _ = fs::remove_file(&user_key_path);
+    let _ = fs::remove_file(&user_pub_path);
+    let _ = fs::remove_file(tls_cert_path);
+    let _ = fs::remove_file(tls_key_path);
+    let _ = fs::remove_dir_all(client_key_dir);
+    let _ = fs::remove_dir_all(user_key_dir);
+    let _ = fs::remove_dir_all(fake_home);
+}
+
 fn build_bin() {
     static BUILD: OnceLock<()> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -507,6 +597,21 @@ fn write_server_config_full(port: u16, key_dir: &PathBuf, user_key_dir: Option<&
         content.push_str(&format!("user_key_dir = {}\n", dir.display()));
     }
     fs::write(&path, content).expect("write server config");
+    path
+}
+
+fn write_user_config(port: u16, user_key_path: &PathBuf, fake_home: &PathBuf) -> PathBuf {
+    let config_dir = fake_home.join(".config/bepr");
+    fs::create_dir_all(&config_dir).expect("create user config dir");
+    let path = config_dir.join("user.conf");
+    fs::write(
+        &path,
+        format!(
+            "server = wss://127.0.0.1:{port}/bepr/user/operator\nprivate_key_path = {}\n",
+            user_key_path.display()
+        ),
+    )
+    .expect("write user config");
     path
 }
 
