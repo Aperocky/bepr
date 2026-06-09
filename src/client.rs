@@ -70,6 +70,38 @@ impl ServerCertVerifier for SkipServerVerification {
 
 const DEFAULT_CLIENT_CONFIG: &str = "/etc/bepr/client.conf";
 
+pub async fn connect_authenticated(
+    url: &str,
+    key: &SigningKey,
+) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, Box<dyn std::error::Error + Send + Sync>> {
+    let (mut ws, _) = if env::var("BEPR_INSECURE_SKIP_TLS_VERIFY").is_ok() {
+        let config = RustlsClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+            .with_no_client_auth();
+        connect_async_tls_with_config(
+            url,
+            None,
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
+        )
+        .await?
+    } else {
+        connect_async(url).await?
+    };
+
+    let Some(msg) = ws.next().await else {
+        return Err("server disconnected before challenge".into());
+    };
+    let challenge = match msg? {
+        Message::Binary(bytes) => bytes,
+        _ => return Err("expected binary challenge".into()),
+    };
+    ws.send(Message::Binary(key.sign(&challenge).to_bytes().to_vec())).await?;
+
+    Ok(ws)
+}
+
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let config = ClientConfig::from_args(args).map_err(|err| err.to_string())?;
     let key = config.load_signing_key().map_err(|err| err.to_string())?;
@@ -87,32 +119,7 @@ async fn run_once(
     key: &SigningKey,
     shell: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (mut ws, _) = if env::var("BEPR_INSECURE_SKIP_TLS_VERIFY").is_ok() {
-        let config = RustlsClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-            .with_no_client_auth();
-        connect_async_tls_with_config(
-            server,
-            None,
-            false,
-            Some(tokio_tungstenite::Connector::Rustls(Arc::new(config))),
-        )
-        .await?
-    } else {
-        connect_async(server).await?
-    };
-
-    let Some(challenge) = ws.next().await else {
-        return Err("server disconnected before challenge".into());
-    };
-    let challenge = match challenge? {
-        Message::Binary(bytes) => bytes,
-        _ => return Err("expected binary challenge".into()),
-    };
-    ws.send(Message::Binary(key.sign(&challenge).to_bytes().to_vec()))
-        .await?;
-
+    let ws = connect_authenticated(server, key).await?;
     log(format!("connected to {server}"));
     let (pty, pts) = pty_process::open()?;
     let mut child = pty_process::Command::new(shell)
@@ -252,7 +259,7 @@ fn default_shell() -> String {
     "/bin/sh".to_string()
 }
 
-fn load_openssh_ed25519_private_key(
+pub fn load_openssh_ed25519_private_key(
     path: &str,
 ) -> Result<SigningKey, Box<dyn std::error::Error + Send + Sync>> {
     parse_openssh_ed25519_private_key(&fs::read_to_string(path)?)
