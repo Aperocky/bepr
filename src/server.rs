@@ -38,6 +38,7 @@ const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 const KEY_RELOAD_INTERVAL_MS: u64 = 300_000;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
 const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
+const HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 
 type PublicKeys = Arc<StdMutex<HashMap<String, VerifyingKey>>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
@@ -121,9 +122,10 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 let user_keys = user_keys.clone();
                 let sessions = sessions.clone();
                 tokio::spawn(async move {
-                    let tls_stream = match acceptor.accept(stream).await {
-                        Ok(s) => s,
-                        Err(err) => { log(format!("{addr}: TLS: {err}")); return; }
+                    let tls_stream = match timeout(handshake_timeout(), acceptor.accept(stream)).await {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(err)) => { log(format!("{addr}: TLS: {err}")); return; }
+                        Err(_) => { log(format!("{addr}: TLS handshake timed out")); return; }
                     };
                     accept_connection(tls_stream, addr, keys, user_keys, sessions).await;
                 });
@@ -156,7 +158,7 @@ async fn accept_connection<S>(
     let cp_client_keys = client_keys.clone();
     let cp_user_keys = user_keys.clone();
 
-    let ws = accept_hdr_async(stream, move |req: &Request, resp: Response| {
+    let ws = timeout(handshake_timeout(), accept_hdr_async(stream, move |req: &Request, resp: Response| {
         let path = req.uri().path();
         let conn = if let Some(id) = path.strip_prefix("/bepr/client/") {
             if id.is_empty() || id.contains('/') {
@@ -187,11 +189,12 @@ async fn accept_connection<S>(
         };
         *cp.lock().unwrap() = Some(conn);
         Ok(resp)
-    }).await;
+    })).await;
 
     let ws = match ws {
-        Ok(ws) => ws,
-        Err(err) => { log(format!("{addr}: {err}")); return; }
+        Ok(Ok(ws)) => ws,
+        Ok(Err(_)) => return,
+        Err(_) => { log(format!("{addr}: WebSocket handshake timed out")); return; }
     };
 
     let conn = conn_path.lock().unwrap().take();
@@ -584,6 +587,10 @@ fn heartbeat_interval() -> Duration {
 
 fn heartbeat_timeout() -> Duration {
     Duration::from_millis(env_u64("BEPR_HEARTBEAT_TIMEOUT_MS", HEARTBEAT_TIMEOUT_MS))
+}
+
+fn handshake_timeout() -> Duration {
+    Duration::from_millis(env_u64("BEPR_HANDSHAKE_TIMEOUT_MS", HANDSHAKE_TIMEOUT_MS))
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
