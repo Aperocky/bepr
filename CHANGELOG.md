@@ -1,5 +1,9 @@
 # Changelog
 
+### v0.5.0
+- 🐛 Fix client silently staying connected after server evicts it — client now sends a heartbeat ping every 35s to detect dead connections and reconnect
+- 🛠️  Tighten server heartbeat timeout from 60s to 45s (unambiguous with 30s ping interval)
+
 ### v0.4.2
 - ✨ `bepr list` now shows connected users alongside clients with a type column (`client`/`user`)
 - ✨ Server tracks user sessions; users appear in `bepr list`

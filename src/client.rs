@@ -100,7 +100,7 @@ pub async fn connect_authenticated(
     Ok(ws)
 }
 
-const CLIENT_PING_INTERVAL_SECS: u64 = 180;
+const CLIENT_PING_INTERVAL_SECS: u64 = 35;
 
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let config = ClientConfig::from_args(args).map_err(|err| err.to_string())?;
