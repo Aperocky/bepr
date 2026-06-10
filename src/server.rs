@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs,
     net::SocketAddr,
@@ -42,6 +42,7 @@ const HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 
 type PublicKeys = Arc<StdMutex<HashMap<String, VerifyingKey>>>;
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
+type ConnectedUsers = Arc<Mutex<HashSet<String>>>;
 
 enum ConnPath {
     Client(String),
@@ -67,6 +68,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         load_tls_acceptor(&config.tls_cert, &config.tls_key).map_err(|err| err.to_string())?,
     ));
     let sessions = Sessions::default();
+    let connected_users = ConnectedUsers::default();
     let tcp = TcpListener::bind(&config.bind).await.map_err(|err| err.to_string())?;
     prepare_operator_socket(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
     let ops = UnixListener::bind(DEFAULT_OPERATOR_SOCKET).map_err(|err| err.to_string())?;
@@ -121,21 +123,23 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 let keys = keys.clone();
                 let user_keys = user_keys.clone();
                 let sessions = sessions.clone();
+                let connected_users = connected_users.clone();
                 tokio::spawn(async move {
                     let tls_stream = match timeout(handshake_timeout(), acceptor.accept(stream)).await {
                         Ok(Ok(s)) => s,
                         Ok(Err(err)) => { log(format!("{addr}: TLS: {err}")); return; }
                         Err(_) => { log(format!("{addr}: TLS handshake timed out")); return; }
                     };
-                    accept_connection(tls_stream, addr, keys, user_keys, sessions).await;
+                    accept_connection(tls_stream, addr, keys, user_keys, sessions, connected_users).await;
                 });
             }
             accepted = ops.accept() => {
                 let (stream, _) = accepted.map_err(|err| err.to_string())?;
                 let keys = keys.clone();
                 let sessions = sessions.clone();
+                let connected_users = connected_users.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_operator(stream, keys, sessions).await {
+                    if let Err(err) = handle_operator(stream, keys, sessions, connected_users).await {
                         log(format!("operator: {err}"));
                     }
                 });
@@ -150,6 +154,7 @@ async fn accept_connection<S>(
     client_keys: PublicKeys,
     user_keys: PublicKeys,
     sessions: Sessions,
+    connected_users: ConnectedUsers,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -207,7 +212,7 @@ async fn accept_connection<S>(
         }
         Some(ConnPath::User(id)) => {
             let Some(key) = user_keys.lock().unwrap().get(&id).copied() else { return; };
-            if let Err(err) = handle_network_operator(ws, addr, id, key, client_keys, sessions).await {
+            if let Err(err) = handle_network_operator(ws, addr, id, key, client_keys, sessions, connected_users).await {
                 log(format!("{addr}: {err}"));
             }
         }
@@ -322,10 +327,11 @@ async fn handle_operator(
     mut stream: UnixStream,
     keys: PublicKeys,
     sessions: Sessions,
+    connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let command = read_line(&mut stream).await?;
     if command == "LIST" {
-        return list_sessions(stream, keys, sessions).await;
+        return list_sessions(stream, keys, sessions, connected_users).await;
     }
     let Some(client_id) = command.strip_prefix("CONNECT ") else {
         stream.write_all(b"ERR unknown command\n").await?;
@@ -397,15 +403,33 @@ async fn handle_network_operator<S>(
     public_key: VerifyingKey,
     client_keys: PublicKeys,
     sessions: Sessions,
+    connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut ws = timeout(Duration::from_secs(30), authenticate(ws, public_key))
+    let ws = timeout(Duration::from_secs(30), authenticate(ws, public_key))
         .await
         .map_err(|_| "authentication timed out")??;
     log(format!("{addr}: operator authenticated {user_id}"));
+    connected_users.lock().await.insert(user_id.clone());
 
+    let result = handle_network_operator_inner(ws, addr, &user_id, client_keys, sessions, connected_users.clone()).await;
+    connected_users.lock().await.remove(&user_id);
+    result
+}
+
+async fn handle_network_operator_inner<S>(
+    mut ws: WebSocketStream<S>,
+    addr: SocketAddr,
+    user_id: &str,
+    client_keys: PublicKeys,
+    sessions: Sessions,
+    connected_users: ConnectedUsers,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let Some(msg) = ws.next().await else {
         return Err("operator disconnected before command".into());
     };
@@ -417,7 +441,7 @@ where
     let command = command.trim();
 
     if command == "LIST" {
-        return list_network_sessions(ws, client_keys, sessions).await;
+        return list_network_sessions(ws, client_keys, sessions, connected_users).await;
     }
 
     let Some(client_id) = command.strip_prefix("CONNECT ") else {
@@ -512,6 +536,7 @@ async fn list_network_sessions<S>(
     mut ws: WebSocketStream<S>,
     client_keys: PublicKeys,
     sessions: Sessions,
+    connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -522,7 +547,11 @@ where
         let sessions = sessions.lock().await;
         for id in ids {
             let state = if sessions.contains_key(&id) { "connected" } else { "disconnected" };
-            lines.push(format!("{id}\t{state}\n"));
+            lines.push(format!("{id}\tclient\t{state}\n"));
+        }
+        let users = connected_users.lock().await;
+        for user_id in users.iter() {
+            lines.push(format!("{user_id}\tuser\tconnected\n"));
         }
     }
     lines.sort();
@@ -558,6 +587,7 @@ async fn list_sessions(
     mut stream: UnixStream,
     keys: PublicKeys,
     sessions: Sessions,
+    connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lines = Vec::new();
     {
@@ -569,7 +599,11 @@ async fn list_sessions(
             } else {
                 "disconnected"
             };
-            lines.push(format!("{client_id}\t{state}\n"));
+            lines.push(format!("{client_id}\tclient\t{state}\n"));
+        }
+        let users = connected_users.lock().await;
+        for user_id in users.iter() {
+            lines.push(format!("{user_id}\tuser\tconnected\n"));
         }
     }
     lines.sort();
@@ -668,7 +702,6 @@ mod tests {
     use super::*;
     use crate::config::parse_openssh_ed25519_public_key;
     use tokio::{io::AsyncReadExt, net::UnixStream};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use ed25519_dalek::Signer;
     use tokio_tungstenite::{accept_async, client_async};
 
@@ -720,7 +753,7 @@ mod tests {
         let sessions_c = sessions.clone();
         let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
         let handle = tokio::spawn(async move {
-            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c).await
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c, ConnectedUsers::default()).await
         });
 
         do_auth(&mut client_ws).await;
@@ -756,7 +789,7 @@ mod tests {
             let vk = verifying_key;
             let ck = client_keys.clone();
             let h = tokio::spawn(async move {
-                handle_network_operator(server_ws, addr, "user1".into(), vk, ck, sessions_c).await
+                handle_network_operator(server_ws, addr, "user1".into(), vk, ck, sessions_c, ConnectedUsers::default()).await
             });
             do_auth(&mut client_ws).await;
             client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
@@ -773,7 +806,7 @@ mod tests {
         let sessions_c = sessions.clone();
         let ck = client_keys.clone();
         let h = tokio::spawn(async move {
-            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, ck, sessions_c).await
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, ck, sessions_c, ConnectedUsers::default()).await
         });
         do_auth(&mut client_ws).await;
         client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
@@ -802,7 +835,7 @@ mod tests {
         let (server_ws, mut client_ws) = ws_pair().await;
         let sessions_c = sessions.clone();
         let handle = tokio::spawn(async move {
-            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c).await
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c, ConnectedUsers::default()).await
         });
 
         do_auth(&mut client_ws).await;
@@ -840,14 +873,14 @@ mod tests {
         let keys_for_task = keys.clone();
         let sessions_for_task = sessions.clone();
         let task = tokio::spawn(async move {
-            list_sessions(server, keys_for_task, sessions_for_task).await.unwrap();
+            list_sessions(server, keys_for_task, sessions_for_task, ConnectedUsers::default()).await.unwrap();
         });
 
         let mut first = Vec::new();
         client.read_to_end(&mut first).await.unwrap();
         task.await.unwrap();
         let first = String::from_utf8(first).unwrap();
-        assert!(first.contains("laptop\tdisconnected"));
+        assert!(first.contains("laptop\tclient\tdisconnected"));
 
         *keys.lock().unwrap() = HashMap::from([(
             "pi".to_string(),
@@ -861,15 +894,15 @@ mod tests {
         let keys_for_task = keys.clone();
         let sessions_for_task = sessions.clone();
         let task = tokio::spawn(async move {
-            list_sessions(server, keys_for_task, sessions_for_task).await.unwrap();
+            list_sessions(server, keys_for_task, sessions_for_task, ConnectedUsers::default()).await.unwrap();
         });
 
         let mut second = Vec::new();
         client.read_to_end(&mut second).await.unwrap();
         task.await.unwrap();
         let second = String::from_utf8(second).unwrap();
-        assert!(second.contains("pi\tdisconnected"));
-        assert!(!second.contains("laptop\tdisconnected"));
+        assert!(second.contains("pi\tclient\tdisconnected"));
+        assert!(!second.contains("laptop\tclient\tdisconnected"));
     }
 
 }

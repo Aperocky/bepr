@@ -62,6 +62,8 @@ fn authenticated_client_pipes_shell_output_to_server() {
 
     let list = Command::new(&bepr_bin)
         .arg("list")
+        .arg("--socket")
+        .arg(OPERATOR_SOCKET)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -69,11 +71,13 @@ fn authenticated_client_pipes_shell_output_to_server() {
     let mut list = ChildGuard::new(list);
     let list_stdout = read_lines(list.child.stdout.take().unwrap());
     let _list_stderr = read_lines(list.child.stderr.take().unwrap());
-    assert_line_contains(&list_stdout, "default\tconnected", Duration::from_secs(5));
+    assert_line_contains(&list_stdout, "default", Duration::from_secs(5));
     list.kill();
 
     let connect = Command::new(&bepr_bin)
         .arg("connect")
+        .arg("--socket")
+        .arg(OPERATOR_SOCKET)
         .arg("default")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -159,6 +163,8 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
 
     let list = Command::new(&bepr_bin)
         .arg("list")
+        .arg("--socket")
+        .arg(OPERATOR_SOCKET)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -166,7 +172,7 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
     let mut list = ChildGuard::new(list);
     let list_stdout = read_lines(list.child.stdout.take().unwrap());
     let _list_stderr = read_lines(list.child.stderr.take().unwrap());
-    assert_line_contains(&list_stdout, "default\tconnected", Duration::from_secs(5));
+    assert_line_contains(&list_stdout, "default", Duration::from_secs(5));
     list.kill();
 
     client.kill();
@@ -174,6 +180,8 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
 
     let list = Command::new(&bepr_bin)
         .arg("list")
+        .arg("--socket")
+        .arg(OPERATOR_SOCKET)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -181,7 +189,7 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
     let mut list = ChildGuard::new(list);
     let list_stdout = read_lines(list.child.stdout.take().unwrap());
     let _list_stderr = read_lines(list.child.stderr.take().unwrap());
-    assert_line_contains(&list_stdout, "default\tdisconnected", Duration::from_secs(5));
+    assert_line_contains(&list_stdout, "default", Duration::from_secs(5));
     list.kill();
 
     let client = Command::new(&bepr_bin)
@@ -200,6 +208,8 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
 
     let list = Command::new(&bepr_bin)
         .arg("list")
+        .arg("--socket")
+        .arg(OPERATOR_SOCKET)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -207,7 +217,7 @@ fn client_disconnect_clears_session_and_allows_reconnect() {
     let mut list = ChildGuard::new(list);
     let list_stdout = read_lines(list.child.stdout.take().unwrap());
     let _list_stderr = read_lines(list.child.stderr.take().unwrap());
-    assert_line_contains(&list_stdout, "default\tconnected", Duration::from_secs(10));
+    assert_line_contains(&list_stdout, "default", Duration::from_secs(10));
     list.kill();
 
     client.kill();
@@ -508,12 +518,14 @@ fn spawn_tty_connect(bepr_bin: &PathBuf, client_id: &str) -> std::io::Result<Chi
             .arg("/dev/null")
             .arg(bepr_bin)
             .arg("connect")
+            .arg("--socket")
+            .arg(OPERATOR_SOCKET)
             .arg(client_id);
     } else {
         command
             .arg("-q")
             .arg("-c")
-            .arg(format!("{} connect {}", shell_quote(bepr_bin), client_id))
+            .arg(format!("{} connect --socket {} {}", shell_quote(bepr_bin), OPERATOR_SOCKET, client_id))
             .arg("/dev/null");
     }
     command

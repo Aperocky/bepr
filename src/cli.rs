@@ -171,9 +171,8 @@ async fn list(args: Vec<String>) -> Result<(), String> {
             _ => return Err("server disconnected".into()),
         };
         let body = body.strip_prefix(b"OK\n").ok_or("unexpected response")?;
-        let mut stdout = io::stdout();
-        stdout.write_all(body).await.map_err(|e| e.to_string())?;
-        stdout.flush().await.map_err(|e| e.to_string())?;
+        let text = std::str::from_utf8(body).map_err(|e| e.to_string())?;
+        print_list(text);
     } else {
         let mut stream = UnixStream::connect(&socket).await.map_err(|e| e.to_string())?;
         stream.write_all(b"LIST\n").await.map_err(|e| e.to_string())?;
@@ -181,14 +180,15 @@ async fn list(args: Vec<String>) -> Result<(), String> {
         let response = read_line(&mut stream).await.map_err(|e| e.to_string())?;
         if response != "OK" { return Err(response); }
 
-        let mut stdout = io::stdout();
-        let mut buf = [0_u8; 8192];
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 8192];
         loop {
-            let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
+            let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
             if n == 0 { break; }
-            stdout.write_all(&buf[..n]).await.map_err(|e| e.to_string())?;
+            buf.extend_from_slice(&chunk[..n]);
         }
-        stdout.flush().await.map_err(|e| e.to_string())?;
+        let text = std::str::from_utf8(&buf).map_err(|e| e.to_string())?;
+        print_list(text);
     }
     Ok(())
 }
@@ -204,6 +204,21 @@ struct ConnectArgs {
 struct ListArgs {
     socket: Option<String>,
     key_path: Option<String>,
+}
+
+fn print_list(text: &str) {
+    let entries: Vec<(&str, &str, &str)> = text
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            Some((parts.next()?, parts.next()?, parts.next()?))
+        })
+        .collect();
+    let max_id_len = entries.iter().map(|(id, _, _)| id.len()).max().unwrap_or(0);
+    let max_type_len = entries.iter().map(|(_, t, _)| t.len()).max().unwrap_or(0);
+    for (id, kind, state) in entries {
+        println!("{:<id_w$}    {:<type_w$}    {}", id, kind, state, id_w = max_id_len, type_w = max_type_len);
+    }
 }
 
 fn parse_connect_args(args: Vec<String>) -> Result<ConnectArgs, String> {
