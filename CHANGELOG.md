@@ -1,5 +1,11 @@
 # Changelog
 
+### v0.4.2
+- ✨ `bepr list` now shows connected users alongside clients with a type column (`client`/`user`)
+- ✨ Server tracks user sessions; users appear in `bepr list`
+- ⚙️  Rename default `key_dir` path to `/etc/bepr/client-keys` in example configs and packaging
+- 🛠️  `bepr list` and `bepr connect` output is now column-aligned
+
 ### v0.4.1
 - 🛠️  Add `bepr --version` / `bepr -V` so update scripts can detect the installed version
 - 🛡️  Add pre-auth handshake timeout and stop logging rejected WebSocket upgrade noise
