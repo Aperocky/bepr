@@ -100,6 +100,8 @@ pub async fn connect_authenticated(
     Ok(ws)
 }
 
+const CLIENT_PING_INTERVAL_SECS: u64 = 180;
+
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let config = ClientConfig::from_args(args).map_err(|err| err.to_string())?;
     let key = config.load_signing_key().map_err(|err| err.to_string())?;
@@ -127,6 +129,9 @@ async fn run_once(
     let (mut ws_tx, mut ws_rx) = ws.split();
     let mut buf = [0_u8; 8192];
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(CLIENT_PING_INTERVAL_SECS));
+    ping_interval.tick().await; // consume immediate first tick
+
     loop {
         tokio::select! {
             status = child.wait() => {
@@ -151,6 +156,9 @@ async fn run_once(
                     Message::Close(_) => break,
                     _ => {}
                 }
+            }
+            _ = ping_interval.tick() => {
+                ws_tx.send(Message::Ping(vec![])).await?;
             }
         }
     }

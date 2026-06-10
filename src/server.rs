@@ -37,7 +37,7 @@ pub const DEFAULT_OPERATOR_SOCKET: &str = "/tmp/bepr.sock";
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 const KEY_RELOAD_INTERVAL_MS: u64 = 300_000;
 const HEARTBEAT_INTERVAL_MS: u64 = 30_000;
-const HEARTBEAT_TIMEOUT_MS: u64 = 60_000;
+const HEARTBEAT_TIMEOUT_MS: u64 = 45_000;
 const HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 
 type PublicKeys = Arc<StdMutex<HashMap<String, VerifyingKey>>>;
