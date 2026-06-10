@@ -16,7 +16,7 @@ fi
 rm -rf "$WORK"
 mkdir -p \
     "$WORK/usr/bin" \
-    "$WORK/etc/bepr/keys" \
+    "$WORK/etc/bepr/client-keys" \
     "$WORK/etc/bepr/user-keys" \
     "$WORK/var/log/bepr" \
     "$WORK/usr/lib/systemd/system" \
@@ -51,7 +51,7 @@ fi
 %files
 /usr/bin/bepr
 %dir /etc/bepr
-%dir /etc/bepr/keys
+%dir /etc/bepr/client-keys
 %dir /etc/bepr/user-keys
 %dir /var/log/bepr
 /etc/bepr/server.conf.example

@@ -17,7 +17,7 @@ rm -rf "$WORK"
 mkdir -p \
     "$WORK/DEBIAN" \
     "$WORK/usr/bin" \
-    "$WORK/etc/bepr/keys" \
+    "$WORK/etc/bepr/client-keys" \
     "$WORK/etc/bepr/user-keys" \
     "$WORK/var/log/bepr" \
     "$WORK/lib/systemd/system" \

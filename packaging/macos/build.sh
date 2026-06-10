@@ -20,7 +20,7 @@ fi
 rm -rf "$WORK"
 mkdir -p \
     "$WORK/usr/local/bin" \
-    "$WORK/etc/bepr/keys" \
+    "$WORK/etc/bepr/client-keys" \
     "$WORK/etc/bepr/user-keys" \
     "$WORK/var/log/bepr" \
     "$WORK/Library/LaunchDaemons" \
