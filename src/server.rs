@@ -16,7 +16,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, UnixListener, UnixStream},
-    sync::{mpsc, oneshot, Mutex},
+    sync::{mpsc, Mutex},
     time::{interval, timeout},
 };
 use tokio_rustls::TlsAcceptor;
@@ -136,10 +136,11 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             accepted = ops.accept() => {
                 let (stream, _) = accepted.map_err(|err| err.to_string())?;
                 let keys = keys.clone();
+                let user_keys = user_keys.clone();
                 let sessions = sessions.clone();
                 let connected_users = connected_users.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_operator(stream, keys, sessions, connected_users).await {
+                    if let Err(err) = handle_operator(stream, keys, user_keys, sessions, connected_users).await {
                         log(format!("operator: {err}"));
                     }
                 });
@@ -212,7 +213,7 @@ async fn accept_connection<S>(
         }
         Some(ConnPath::User(id)) => {
             let Some(key) = user_keys.lock().unwrap().get(&id).copied() else { return; };
-            if let Err(err) = handle_network_operator(ws, addr, id, key, client_keys, sessions, connected_users).await {
+            if let Err(err) = handle_network_operator(ws, addr, id, key, client_keys, user_keys, sessions, connected_users).await {
                 log(format!("{addr}: {err}"));
             }
         }
@@ -235,12 +236,9 @@ where
         .map_err(|_| "authentication timed out")??;
     log(format!("{addr}: authenticated {client_id}"));
 
-    let (mut ws_tx, mut ws_rx) = ws.split();
-    let (to_client_tx, mut to_client_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (ws_tx, mut ws_rx) = ws.split();
+    let (to_client_tx, to_client_rx) = mpsc::channel::<Vec<u8>>(32);
     let last_pong = Arc::new(Mutex::new(Instant::now()));
-    let heartbeat_interval = heartbeat_interval();
-    let heartbeat_timeout = heartbeat_timeout();
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     {
         let mut sessions = sessions.lock().await;
@@ -257,61 +255,31 @@ where
         );
     }
 
-    let client_for_writer = client_id.clone();
     let last_pong_for_writer = last_pong.clone();
-    let write_task = tokio::spawn(async move {
-        let mut shutdown_tx = Some(shutdown_tx);
-        let mut heartbeat = interval(heartbeat_interval);
-        loop {
-            tokio::select! {
-                Some(bytes) = to_client_rx.recv() => {
-                    ws_tx.send(Message::Binary(bytes)).await?;
-                }
-                _ = heartbeat.tick() => {
-                    if last_pong_for_writer.lock().await.elapsed() > heartbeat_timeout {
-                        ws_tx.send(Message::Close(None)).await?;
-                        if let Some(tx) = shutdown_tx.take() {
-                            let _ = tx.send(());
-                        }
-                        break;
-                    }
-                    ws_tx.send(Message::Ping(Vec::new())).await?;
-                }
-                else => break,
-            }
-        }
-        Ok::<_, tokio_tungstenite::tungstenite::Error>(())
-    });
+    let mut write_task = spawn_heartbeat_write_task(ws_tx, to_client_rx, last_pong_for_writer);
 
     loop {
         tokio::select! {
-            _ = &mut shutdown_rx => {
-                break;
-            }
+            _ = &mut write_task => { break; }
             msg = ws_rx.next() => {
-                let Some(msg) = msg else {
-                    break;
-                };
+                let Some(msg) = msg else { break; };
                 let msg = match msg {
                     Ok(msg) => msg,
-                    Err(err) => {
-                        log(format!("{addr}: {err}"));
-                        break;
-                    }
+                    Err(err) => { log(format!("{addr}: {err}")); break; }
                 };
-                let bytes = match msg {
-                    Message::Binary(bytes) => bytes,
-                    Message::Text(text) => text.into_bytes(),
-                    Message::Pong(_) => {
-                        *last_pong.lock().await = Instant::now();
-                        continue;
+                match msg {
+                    Message::Binary(bytes) => {
+                        let operator = queue_client_output(&sessions, &client_id, &bytes).await;
+                        if let Some(operator) = operator { let _ = operator.send(bytes).await; }
                     }
+                    Message::Text(text) => {
+                        let bytes = text.into_bytes();
+                        let operator = queue_client_output(&sessions, &client_id, &bytes).await;
+                        if let Some(operator) = operator { let _ = operator.send(bytes).await; }
+                    }
+                    Message::Pong(_) => { *last_pong.lock().await = Instant::now(); }
                     Message::Close(_) => break,
-                    _ => continue,
-                };
-                let operator = queue_client_output(&sessions, &client_id, &bytes).await;
-                if let Some(operator) = operator {
-                    let _ = operator.send(bytes).await;
+                    _ => {}
                 }
             }
         }
@@ -319,40 +287,84 @@ where
 
     sessions.lock().await.remove(&client_id);
     write_task.abort();
-    log(format!("{addr}: disconnected {client_for_writer}"));
+    log(format!("{addr}: disconnected {client_id}"));
     Ok(())
+}
+
+fn spawn_heartbeat_write_task<S>(
+    mut ws_tx: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    last_pong: Arc<Mutex<Instant>>,
+) -> tokio::task::JoinHandle<Result<(), tokio_tungstenite::tungstenite::Error>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let heartbeat_interval = heartbeat_interval();
+    let heartbeat_timeout = heartbeat_timeout();
+    tokio::spawn(async move {
+        let mut heartbeat = interval(heartbeat_interval);
+        loop {
+            tokio::select! {
+                bytes = rx.recv() => {
+                    let Some(bytes) = bytes else { break; };
+                    ws_tx.send(Message::Binary(bytes)).await?;
+                }
+                _ = heartbeat.tick() => {
+                    if last_pong.lock().await.elapsed() > heartbeat_timeout {
+                        break;
+                    }
+                    ws_tx.send(Message::Ping(vec![])).await?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+async fn attach_session(
+    sessions: &Sessions,
+    client_id: &str,
+) -> Result<(mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, Vec<u8>), &'static [u8]> {
+    let mut sessions = sessions.lock().await;
+    let Some(session) = sessions.get_mut(client_id) else {
+        return Err(b"ERR no such client\n");
+    };
+    if session.to_operator.is_some() {
+        return Err(b"ERR already attached\n");
+    }
+    let (to_operator_tx, to_operator_rx) = mpsc::channel::<Vec<u8>>(32);
+    let pending_output = std::mem::take(&mut session.pending_output);
+    session.to_operator = Some(to_operator_tx);
+    Ok((session.to_client.clone(), to_operator_rx, pending_output))
+}
+
+async fn detach_session(sessions: &Sessions, client_id: &str) {
+    if let Some(session) = sessions.lock().await.get_mut(client_id) {
+        session.to_operator = None;
+    }
 }
 
 async fn handle_operator(
     mut stream: UnixStream,
     keys: PublicKeys,
+    user_keys: PublicKeys,
     sessions: Sessions,
     connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let command = read_line(&mut stream).await?;
     if command == "LIST" {
-        return list_sessions(stream, keys, sessions, connected_users).await;
+        return list_sessions(stream, keys, user_keys, sessions, connected_users).await;
     }
     let Some(client_id) = command.strip_prefix("CONNECT ") else {
         stream.write_all(b"ERR unknown command\n").await?;
         return Ok(());
     };
     let client_id = client_id.to_string();
-    let (to_client, mut to_operator_rx, pending_output) = {
-        let mut sessions = sessions.lock().await;
-        let Some(session) = sessions.get_mut(&client_id) else {
-            stream.write_all(b"ERR no such client\n").await?;
-            return Ok(());
+    let (to_client, mut to_operator_rx, pending_output) =
+        match attach_session(&sessions, &client_id).await {
+            Ok(v) => v,
+            Err(e) => { stream.write_all(e).await?; return Ok(()); }
         };
-        if session.to_operator.is_some() {
-            stream.write_all(b"ERR already attached\n").await?;
-            return Ok(());
-        }
-        let (to_operator_tx, to_operator_rx) = mpsc::channel::<Vec<u8>>(32);
-        let pending_output = std::mem::take(&mut session.pending_output);
-        session.to_operator = Some(to_operator_tx);
-        (session.to_client.clone(), to_operator_rx, pending_output)
-    };
 
     stream.write_all(b"OK\n").await?;
     let (mut reader, mut writer) = stream.into_split();
@@ -379,19 +391,13 @@ async fn handle_operator(
             }
             read = reader.read(&mut buf) => {
                 let n = read?;
-                if n == 0 {
-                    break;
-                }
-                if to_client.send(buf[..n].to_vec()).await.is_err() {
-                    break;
-                }
+                if n == 0 { break; }
+                if to_client.send(buf[..n].to_vec()).await.is_err() { break; }
             }
         }
     }
 
-    if let Some(session) = sessions.lock().await.get_mut(&client_id) {
-        session.to_operator = None;
-    }
+    detach_session(&sessions, &client_id).await;
     write_task.abort();
     Ok(())
 }
@@ -402,6 +408,7 @@ async fn handle_network_operator<S>(
     user_id: String,
     public_key: VerifyingKey,
     client_keys: PublicKeys,
+    user_keys: PublicKeys,
     sessions: Sessions,
     connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -412,24 +419,8 @@ where
         .await
         .map_err(|_| "authentication timed out")??;
     log(format!("{addr}: operator authenticated {user_id}"));
-    connected_users.lock().await.insert(user_id.clone());
 
-    let result = handle_network_operator_inner(ws, addr, &user_id, client_keys, sessions, connected_users.clone()).await;
-    connected_users.lock().await.remove(&user_id);
-    result
-}
-
-async fn handle_network_operator_inner<S>(
-    mut ws: WebSocketStream<S>,
-    addr: SocketAddr,
-    user_id: &str,
-    client_keys: PublicKeys,
-    sessions: Sessions,
-    connected_users: ConnectedUsers,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
+    let mut ws = ws;
     let Some(msg) = ws.next().await else {
         return Err("operator disconnected before command".into());
     };
@@ -441,7 +432,7 @@ where
     let command = command.trim();
 
     if command == "LIST" {
-        return list_network_sessions(ws, client_keys, sessions, connected_users).await;
+        return list_network_sessions(ws, client_keys, user_keys, sessions, connected_users).await;
     }
 
     let Some(client_id) = command.strip_prefix("CONNECT ") else {
@@ -450,56 +441,27 @@ where
     };
     let client_id = client_id.trim().to_string();
 
-    let (to_client, mut to_operator_rx, pending_output) = {
-        let mut sessions = sessions.lock().await;
-        let Some(session) = sessions.get_mut(&client_id) else {
-            ws.send(Message::Binary(b"ERR no such client\n".to_vec())).await?;
-            return Ok(());
+    let (to_client, to_operator_rx, pending_output) =
+        match attach_session(&sessions, &client_id).await {
+            Ok(v) => v,
+            Err(e) => { ws.send(Message::Binary(e.to_vec())).await?; return Ok(()); }
         };
-        if session.to_operator.is_some() {
-            ws.send(Message::Binary(b"ERR already attached\n".to_vec())).await?;
-            return Ok(());
-        }
-        let (to_operator_tx, to_operator_rx) = mpsc::channel::<Vec<u8>>(32);
-        let pending_output = std::mem::take(&mut session.pending_output);
-        session.to_operator = Some(to_operator_tx);
-        (session.to_client.clone(), to_operator_rx, pending_output)
-    };
+
+    connected_users.lock().await.insert(user_id.clone());
 
     if ws.send(Message::Binary(b"OK\n".to_vec())).await.is_err()
         || (!pending_output.is_empty()
             && ws.send(Message::Binary(pending_output)).await.is_err())
     {
-        if let Some(s) = sessions.lock().await.get_mut(&client_id) {
-            s.to_operator = None;
-        }
+        detach_session(&sessions, &client_id).await;
+        connected_users.lock().await.remove(&user_id);
         return Ok(());
     }
 
     let last_pong = Arc::new(Mutex::new(Instant::now()));
-    let last_pong_for_task = last_pong.clone();
-    let heartbeat_interval = heartbeat_interval();
-    let heartbeat_timeout = heartbeat_timeout();
 
-    let (mut ws_tx, mut ws_rx) = ws.split();
-    let mut write_task = tokio::spawn(async move {
-        let mut heartbeat = interval(heartbeat_interval);
-        loop {
-            tokio::select! {
-                bytes = to_operator_rx.recv() => {
-                    let Some(bytes) = bytes else { break; };
-                    ws_tx.send(Message::Binary(bytes)).await?;
-                }
-                _ = heartbeat.tick() => {
-                    if last_pong_for_task.lock().await.elapsed() > heartbeat_timeout {
-                        break;
-                    }
-                    ws_tx.send(Message::Ping(vec![])).await?;
-                }
-            }
-        }
-        Ok::<_, tokio_tungstenite::tungstenite::Error>(())
-    });
+    let (ws_tx, mut ws_rx) = ws.split();
+    let mut write_task = spawn_heartbeat_write_task(ws_tx, to_operator_rx, last_pong.clone());
 
     loop {
         tokio::select! {
@@ -514,9 +476,7 @@ where
                     Message::Text(text) => {
                         if to_client.send(text.into_bytes()).await.is_err() { break; }
                     }
-                    Message::Pong(_) => {
-                        *last_pong.lock().await = Instant::now();
-                    }
+                    Message::Pong(_) => { *last_pong.lock().await = Instant::now(); }
                     Message::Close(_) => break,
                     _ => {}
                 }
@@ -524,37 +484,24 @@ where
         }
     }
 
-    if let Some(session) = sessions.lock().await.get_mut(&client_id) {
-        session.to_operator = None;
-    }
+    detach_session(&sessions, &client_id).await;
     write_task.abort();
-    log(format!("{addr}: operator {user_id} detached from {client_id}"));
+    connected_users.lock().await.remove(&user_id);
+    log(format!("{addr}: user {user_id} detached from {client_id}"));
     Ok(())
 }
 
 async fn list_network_sessions<S>(
     mut ws: WebSocketStream<S>,
     client_keys: PublicKeys,
+    user_keys: PublicKeys,
     sessions: Sessions,
     connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut lines = Vec::new();
-    {
-        let ids = client_keys.lock().unwrap().keys().cloned().collect::<Vec<_>>();
-        let sessions = sessions.lock().await;
-        for id in ids {
-            let state = if sessions.contains_key(&id) { "connected" } else { "disconnected" };
-            lines.push(format!("{id}\tclient\t{state}\n"));
-        }
-        let users = connected_users.lock().await;
-        for user_id in users.iter() {
-            lines.push(format!("{user_id}\tuser\tconnected\n"));
-        }
-    }
-    lines.sort();
+    let lines = build_list_lines(&client_keys, &user_keys, &sessions, &connected_users).await;
     let mut response = b"OK\n".to_vec();
     for line in lines {
         response.extend_from_slice(line.as_bytes());
@@ -583,30 +530,37 @@ async fn queue_client_output(
     None
 }
 
+async fn build_list_lines(
+    client_keys: &PublicKeys,
+    user_keys: &PublicKeys,
+    sessions: &Sessions,
+    connected_users: &ConnectedUsers,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let client_ids = client_keys.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+    let sessions = sessions.lock().await;
+    for id in client_ids {
+        let state = if sessions.contains_key(&id) { "connected" } else { "disconnected" };
+        lines.push(format!("{id}\tclient\t{state}\n"));
+    }
+    let user_ids = user_keys.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+    let connected = connected_users.lock().await;
+    for user_id in user_ids {
+        let state = if connected.contains(&user_id) { "connected" } else { "disconnected" };
+        lines.push(format!("{user_id}\tuser\t{state}\n"));
+    }
+    lines.sort();
+    lines
+}
+
 async fn list_sessions(
     mut stream: UnixStream,
     keys: PublicKeys,
+    user_keys: PublicKeys,
     sessions: Sessions,
     connected_users: ConnectedUsers,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut lines = Vec::new();
-    {
-        let client_ids = keys.lock().unwrap().keys().cloned().collect::<Vec<_>>();
-        let sessions = sessions.lock().await;
-        for client_id in client_ids {
-            let state = if sessions.contains_key(&client_id) {
-                "connected"
-            } else {
-                "disconnected"
-            };
-            lines.push(format!("{client_id}\tclient\t{state}\n"));
-        }
-        let users = connected_users.lock().await;
-        for user_id in users.iter() {
-            lines.push(format!("{user_id}\tuser\tconnected\n"));
-        }
-    }
-    lines.sort();
+    let lines = build_list_lines(&keys, &user_keys, &sessions, &connected_users).await;
     stream.write_all(b"OK\n").await?;
     for line in lines {
         stream.write_all(line.as_bytes()).await?;
@@ -753,7 +707,7 @@ mod tests {
         let sessions_c = sessions.clone();
         let addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
         let handle = tokio::spawn(async move {
-            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c, ConnectedUsers::default()).await
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, PublicKeys::default(), sessions_c, ConnectedUsers::default()).await
         });
 
         do_auth(&mut client_ws).await;
@@ -789,7 +743,7 @@ mod tests {
             let vk = verifying_key;
             let ck = client_keys.clone();
             let h = tokio::spawn(async move {
-                handle_network_operator(server_ws, addr, "user1".into(), vk, ck, sessions_c, ConnectedUsers::default()).await
+                handle_network_operator(server_ws, addr, "user1".into(), vk, ck, PublicKeys::default(), sessions_c, ConnectedUsers::default()).await
             });
             do_auth(&mut client_ws).await;
             client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
@@ -806,7 +760,7 @@ mod tests {
         let sessions_c = sessions.clone();
         let ck = client_keys.clone();
         let h = tokio::spawn(async move {
-            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, ck, sessions_c, ConnectedUsers::default()).await
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, ck, PublicKeys::default(), sessions_c, ConnectedUsers::default()).await
         });
         do_auth(&mut client_ws).await;
         client_ws.send(Message::Binary(b"CONNECT testclient".to_vec())).await.unwrap();
@@ -835,7 +789,7 @@ mod tests {
         let (server_ws, mut client_ws) = ws_pair().await;
         let sessions_c = sessions.clone();
         let handle = tokio::spawn(async move {
-            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, sessions_c, ConnectedUsers::default()).await
+            handle_network_operator(server_ws, addr, "user1".into(), verifying_key, client_keys, PublicKeys::default(), sessions_c, ConnectedUsers::default()).await
         });
 
         do_auth(&mut client_ws).await;
@@ -873,7 +827,7 @@ mod tests {
         let keys_for_task = keys.clone();
         let sessions_for_task = sessions.clone();
         let task = tokio::spawn(async move {
-            list_sessions(server, keys_for_task, sessions_for_task, ConnectedUsers::default()).await.unwrap();
+            list_sessions(server, keys_for_task, PublicKeys::default(), sessions_for_task, ConnectedUsers::default()).await.unwrap();
         });
 
         let mut first = Vec::new();
@@ -894,7 +848,7 @@ mod tests {
         let keys_for_task = keys.clone();
         let sessions_for_task = sessions.clone();
         let task = tokio::spawn(async move {
-            list_sessions(server, keys_for_task, sessions_for_task, ConnectedUsers::default()).await.unwrap();
+            list_sessions(server, keys_for_task, PublicKeys::default(), sessions_for_task, ConnectedUsers::default()).await.unwrap();
         });
 
         let mut second = Vec::new();
